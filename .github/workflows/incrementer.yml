@@ -17,11 +17,23 @@ jobs:
 
       - name: Set up Node ID
         id: node_id
-        run: echo "NODE_ID=$(date +%s%N | sha256sum | base64 | head -c 8)" >> $GITHUB_ENV
+        run: |
+          NODE_ID=$(date +%s%N | sha256sum | base64 | head -c 8)
+          echo "NODE_ID=${NODE_ID}" >> $GITHUB_ENV
+
+      - name: Calculate Port Number
+        id: port_number
+        run: |
+          BASE_PORT=3400
+          # Use the GitHub run number to determine the port number, increment by 1
+          PORT_NUMBER=$((BASE_PORT + GITHUB_RUN_NUMBER + 1))
+          echo "PORT_NUMBER=${PORT_NUMBER}" >> $GITHUB_ENV
 
       - name: Update container name and Python code
         run: |
           NODE_ID=${{ steps.node_id.outputs.NODE_ID }}
+          PORT_NUMBER=${{ steps.port_number.outputs.PORT_NUMBER }}
+
           # Update docker-compose.yml
           sed -i "s/container_name: node_placeholder.omne/container_name: node${NODE_ID}.omne/g" docker-compose.yml
           
@@ -31,9 +43,12 @@ jobs:
           # Update the Node class initialization in open_node.py
           sed -i "s/self.current_node_url = \"http:\/\/current-node-url:3400\"/self.current_node_url = \"http:\/\/node${NODE_ID}.omne:3400\"/g" app/open_node.py
 
+          # Update the port number in docker-compose.yml
+          sed -i "s/3401:3400/${PORT_NUMBER}:3400/g" docker-compose.yml
+
           # Commit changes
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
           git add docker-compose.yml app/open_node.py
-          git commit -m "Update container name and node URL to node${NODE_ID}.omne"
+          git commit -m "Update container name, node URL, and port number to node${NODE_ID}.omne and port ${PORT_NUMBER}"
           git push
