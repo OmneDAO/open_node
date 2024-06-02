@@ -993,12 +993,8 @@ class Wallet:
         return -1
 
     @staticmethod
-    def generate_key_from_passphrase(self, private_key):
+    def generate_key_from_passphrase(self, private_key, password):
         try:
-            with open("pk.json") as file:
-                data = json.load(file)
-            password = data["pw"]
-
             passphrase_bytes = password.encode('utf-8')  # Encode the passphrase to bytes
             salt = os.urandom(16)  # Generate a random salt
             key = hashlib.pbkdf2_hmac(
