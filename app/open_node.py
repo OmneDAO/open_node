@@ -112,27 +112,35 @@ class Oracle:
         self.services = self.discover_services("node")
 
     def fetch_price(self):
-        try:
-            url = f"http://node1.medivolve:3400/get_latest_price"
-            response = requests.get(url)
-            if response.status_code == 200:
-                data = response.json()
-                usd_to_other_currency = data.get("price", None)
-                if usd_to_other_currency is not None:
-                    return usd_to_other_currency
+        # Discover services if not already discovered
+        if not self.services:
+            self.services = self.discover_services("node")
+
+        # Attempt to fetch price from each discovered service
+        for service in self.services:
+            try:
+                url = f"http://{service}:3400/get_latest_price"
+                response = requests.get(url)
+                if response.status_code == 200:
+                    data = response.json()
+                    usd_to_other_currency = data.get("price", None)
+                    if usd_to_other_currency is not None:
+                        return usd_to_other_currency
+                    else:
+                        logging.error("Currency data not found in the response.")
                 else:
-                    raise ValueError("Currency data not found in the response.")
-            else:
-                raise ValueError("Failed to fetch currency data. Status code: " + str(response.status_code))
-        except Exception as e:
-            raise ValueError("Error fetching currency data: " + str(e))
+                    logging.error(f"Failed to fetch currency data from {service}. Status code: {response.status_code}")
+            except Exception as e:
+                logging.error(f"Error fetching currency data from {service}: {e}")
+
+        raise ValueError("Error fetching currency data from all available nodes.")
 
     def discover_services(self, prefix):
         discovered_services = []
         max_range = 10
 
         for i in range(1, max_range):
-            service_name = f"{prefix}{i}.medivolve"
+            service_name = f"{prefix}{i}.omne"
             try:
                 service_address = socket.gethostbyname(service_name)
                 if service_address != self.current_node_url:
@@ -1132,16 +1140,21 @@ class OMCTreasury:
             self.balance = treasury_data['balance']
 
 class Node:
-    def __init__(self, address=None, stake_weight=0, url="http://node2.medivolve:3400",
+    def __init__(self, current_node_url="http://current-node-url:3400", address=None, stake_weight=0,
                  version="0.0.1", private_key=None, public_key=None, signature=None, steward=None):
         self.address = address
         self.stake_weight = stake_weight
-        self.url = url
         self.version = version
         self.private_key = private_key
         self.public_key = public_key
         self.signature = signature
         self.steward = steward
+        self.current_node_url = current_node_url
+        
+        # Discover existing services and set the URL dynamically
+        discovered_services = self.discover_services("node")
+        node_num = len(discovered_services)
+        self.url = f"http://node{node_num}.omne:3400"
 
         # If address and keys are not provided, generate new ones
         if not self.address or not self.private_key or not self.public_key:
@@ -1150,8 +1163,6 @@ class Node:
 
             # Extract key data
             self.address = account['address']
-            # Assuming private_key is also a byte-like object that needs conversion
-            # Adjust this line if private_key is already correctly formatted
             self.private_key = binascii.hexlify(account['private_key']).decode('utf-8')
             self.public_key = account['pub_key']
 
@@ -1194,6 +1205,24 @@ class Node:
             'signature': self.signature,
             'steward': self.steward
         }
+
+    def discover_services(self, prefix):
+        discovered_services = []
+        max_range = 10
+
+        for i in range(1, max_range):
+            service_name = f"{prefix}{i}.omne"
+            try:
+                service_address = socket.gethostbyname(service_name)
+                if service_address != self.current_node_url:
+                    discovered_services.append(service_name)
+                    logging.debug(f"Discovered service: {service_name}")
+            except socket.gaierror:
+                continue
+
+        if not discovered_services:
+            logging.warning("No services were discovered.")
+        return discovered_services
 
 class Block:
     def __init__(self, index: int, fee: int, previous_hash: str, timestamp: str, transactions: list, validator: str, validator_fee: int):
