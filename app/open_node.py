@@ -57,11 +57,24 @@ from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 from bson.objectid import ObjectId
 
-HASH_API_URL = "http://your-api-url/hashes"
+HASH_API_URL = "http://localhost:3000/hashes"
 
-with open("aur.json") as file:
-    data = json.load(file)
-AUTH_TOKEN = data["a"]
+def fetch_auth_token():
+    try:
+        response = requests.get(f"{HASH_API_URL}/auth-token")
+        if response.status_code != 200:
+            raise ValueError("Failed to fetch auth token from public API.")
+        data = response.json()
+        return data.get("authToken")
+    except Exception as e:
+        logging.error(f"Error fetching auth token from public API: {e}")
+        raise
+
+# Retrieve the auth token
+AUTH_TOKEN = fetch_auth_token()
+
+if not AUTH_TOKEN:
+    raise ValueError("Auth token could not be retrieved. Check your API setup.")
 
 class CustomEncoder(json.JSONEncoder):
     def default(self, obj):
