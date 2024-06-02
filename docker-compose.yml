@@ -5,23 +5,22 @@ services:
       context: .
       dockerfile: Dockerfile
     image: open-node:latest
-    container_name: node_placeholder.omne
+    container_name: node.omne
     ports:
-      - "3401:3400"
+      - "3400:3400"
     networks:
       - node_one_omne-net
     volumes:
       - ./app:/app
     labels:
-      app: node-two
+      app: node-one
       level: blockchain
       role: validator
       tier: backend
       track: continuous
     environment:
-      - PYTHONPATH=/app
-    stdin_open: true
-    tty: true
+      - MONGO_USERNAME=${MONGO_USERNAME}
+      - MONGO_PASSWORD=${MONGO_PASSWORD}
 
 networks:
   node_one_omne-net:

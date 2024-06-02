@@ -37,8 +37,3 @@ jobs:
           git add docker-compose.yml app/open_node.py
           git commit -m "Update container name and node URL to node${NODE_ID}.omne"
           git push
-
-      - name: Set up MongoDB credentials
-        env:
-          MONGO_USERNAME: ${{ secrets.MONGO_USERNAME }}
-          MONGO_PASSWORD: ${{ secrets.MONGO_PASSWORD }}
