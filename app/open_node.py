@@ -1372,28 +1372,11 @@ class Blockchain:
         if services:  # Ensure services is not None or empty
             self.ping_services(services, "check_nodes", self.node.url)
 
-        self.node.steward = self.treasury.treasury_account
-        self.update_node_state(self.node)
-        self.check_chain_length_and_sync(services)
-        self.update_validators()
-        self.broadcast_node_data(self.node)
+        # Set steward address from environment variable
+        self.node.steward = os.getenv('STEWARD_ADDRESS')
+        if not self.node.steward:
+            raise ValueError("Steward address not provided. Set the STEWARD_ADDRESS environment variable.")
 
-        # Start the mining thread
-        mining_thread = threading.Thread(target=self.mine_new_block_periodically)
-        mining_thread.daemon = True  # Daemonize the thread
-        mining_thread.start()
-
-    def initialize_node(self):
-        """
-        Initialize the node after class hashes have been verified.
-        """
-        # Service discovery and pinging
-        service_prefix = "node"  # Adjust the prefix according to your container naming convention
-        services = self.discover_services(service_prefix)
-        if services:  # Ensure services is not None or empty
-            self.ping_services(services, "check_nodes", self.node.url)
-
-        self.node.steward = self.treasury.treasury_account
         self.update_node_state(self.node)
         self.check_chain_length_and_sync(services)
         self.update_validators()
