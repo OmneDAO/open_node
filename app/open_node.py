@@ -57,7 +57,17 @@ from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 from bson.objectid import ObjectId
 
-uri = 'mongodb+srv://gregb:AB6zZqCHJBUJMSxK@cluster0.dj837ya.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0'
+# Retrieve MongoDB credentials from environment variables
+mongo_username = os.getenv('MONGO_USERNAME')
+mongo_password = os.getenv('MONGO_PASSWORD')
+
+if not mongo_username or not mongo_password:
+    raise ValueError("MongoDB credentials not found in environment variables")
+
+# Construct the MongoDB URI
+uri = f'mongodb+srv://{mongo_username}:{mongo_password}@cluster0.dj837ya.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0'
+
+# Initialize the MongoDB client
 client = MongoClient(uri, server_api=ServerApi('1'))
 
 try:
