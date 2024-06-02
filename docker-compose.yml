@@ -1,14 +1,15 @@
 version: '3'
 services:
-  node2.medivolve:
+  node.omne:
     build:
       context: .
       dockerfile: Dockerfile
-    image: node-two:latest
+    image: open-node:latest
+    container_name: node_placeholder.omne
     ports:
       - "3401:3400"
     networks:
-      - node_one_mediv-net
+      - node_one_omne-net
     volumes:
       - ./app:/app
     labels:
@@ -23,5 +24,5 @@ services:
     tty: true
 
 networks:
-  node_one_mediv-net:
+  node_one_omne-net:
     external: true
