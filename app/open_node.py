@@ -57,24 +57,7 @@ from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 from bson.objectid import ObjectId
 
-# Retrieve MongoDB credentials from environment variables
-mongo_username = os.getenv('MONGO_USERNAME')
-mongo_password = os.getenv('MONGO_PASSWORD')
-
-if not mongo_username or not mongo_password:
-    raise ValueError("MongoDB credentials not found in environment variables")
-
-# Construct the MongoDB URI
-uri = f'mongodb+srv://{mongo_username}:{mongo_password}@cluster0.dj837ya.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0'
-
-# Initialize the MongoDB client
-client = MongoClient(uri, server_api=ServerApi('1'))
-
-try:
-    client.admin.command('ping')
-    logging.info("Pinged your deployment. You successfully connected to MongoDB!")
-except Exception as e:
-    logging.error(e)
+HASH_API_URL = "http://your-api-url/hashes"
 
 with open("aur.json") as file:
     data = json.load(file)
@@ -1159,7 +1142,7 @@ class Node:
         
         # Discover existing services and set the URL dynamically
         discovered_services = self.discover_services("node")
-        node_num = len(discovered_services)
+        node_num = len(discovered_services) + 1
         self.url = f"http://node{node_num}.omne:3400"
 
         # If address and keys are not provided, generate new ones
@@ -1332,27 +1315,33 @@ class Blockchain:
     @staticmethod
     def verify_class_hashes():
         """
-        This function retrieves the stored hashes of classes from the database and compares them
+        This function retrieves the stored hashes of classes from the public API and compares them
         with the hashes of the current local classes to ensure integrity.
         """
+        try:
+            response = requests.get(HASH_API_URL)
+            if response.status_code != 200:
+                raise ValueError("Failed to fetch class hashes from public API.")
+
+            stored_hashes = response.json()
+        except Exception as e:
+            logging.error(f"Error fetching class hashes from public API: {e}")
+            raise
+
         classes_to_verify = {
             'coin': OMC,
             'verifier': Verifier,
             'crypto_utils': CUtils,
             'fee_calculator': DynamicFeeCalculator
         }
-        
-        db = client["classes"]
+
         for class_name, cls in classes_to_verify.items():
-            col = db[class_name]
-            stored_hash_entry = col.find_one()
-            if not stored_hash_entry:
-                logging.error(f"Stored hash for class {class_name} not found in the database.")
-                raise ValueError(f"Stored hash for class {class_name} not found in the database.")
-            
-            stored_hash = stored_hash_entry['hash']
+            stored_hash = stored_hashes.get(class_name)
+            if not stored_hash:
+                logging.error(f"Stored hash for class {class_name} not found in the public API response.")
+                raise ValueError(f"Stored hash for class {class_name} not found.")
+
             local_hash = Blockchain.serialize_and_create_single_hash(cls)
-            
             if stored_hash != local_hash:
                 logging.error(f"Hash mismatch for class {class_name}. Possible tampering detected.")
                 raise ValueError(f"Hash mismatch for class {class_name}. Possible tampering detected.")
@@ -4409,6 +4398,17 @@ def receive_price_data():
 @app.route('/get_latest_price', methods=['GET'])
 def get_latest_price():
     return jsonify(latest_price_data), 200
+
+@app.route('/get_class_hashes', methods=['GET'])
+def get_class_hashes():
+    # Load class hashes from a secure source (e.g., a file, a secure database, etc.)
+    class_hashes = {
+        'coin': 'hash_of_OMC_class',
+        'verifier': 'hash_of_Verifier_class',
+        'crypto_utils': 'hash_of_CUtils_class',
+        'fee_calculator': 'hash_of_DynamicFeeCalculator_class'
+    }
+    return jsonify(class_hashes)
 
 #run it
 if __name__ == '__main__':
