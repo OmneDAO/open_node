@@ -1,0 +1,27 @@
+version: '3'
+services:
+  node2.medivolve:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: node-two:latest
+    ports:
+      - "3401:3400"
+    networks:
+      - node_one_mediv-net
+    volumes:
+      - ./app:/app
+    labels:
+      app: node-two
+      level: blockchain
+      role: validator
+      tier: backend
+      track: continuous
+    environment:
+      - PYTHONPATH=/app
+    stdin_open: true
+    tty: true
+
+networks:
+  node_one_mediv-net:
+    external: true

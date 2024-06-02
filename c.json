@@ -1,0 +1,6 @@
+{
+  "accessKeyId": "AKIASHNG2SFGS7R2DYNX",
+  "secretAccessKey": "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",
+  "region": "us-east-1",
+  "S3_BUCKET_NAME": "blox-1"
+}

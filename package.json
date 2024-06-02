@@ -1,0 +1,14 @@
+{
+  "name": "open_node",
+  "version": "1.0.1",
+  "description": "Opem node for OmneChain",
+  "main": "",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "OmneChainDAO (Greg B)",
+  "license": "UNLICENSED",
+  "dependencies": {
+    
+  }
+}
