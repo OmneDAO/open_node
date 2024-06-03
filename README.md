@@ -10,6 +10,25 @@ OMNE open source node
 - Docker Compose
 - Omne wallet address (use the https://phaylos.xyz mobile wallet to create a wallet address if you do not have one already)
 
+- `sha256sum` command
+
+### Installing `sha256sum` on macOS
+
+If you're on macOS, you might need to install `coreutils` to get `sha256sum`:
+
+```sh
+brew install coreutils
+```
+
+**After installation, you might need to add the coreutils binaries to your PATH**:
+
+```sh
+echo 'export PATH="/usr/local/opt/coreutils/libexec/gnubin:$PATH"' >> ~/.zshrc
+```
+```sh
+source ~/.zshrc
+```
+
 ### Getting Started
 
 1. **Clone the repository**:
