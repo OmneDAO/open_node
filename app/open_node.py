@@ -761,7 +761,7 @@ class AccMngr:
 
     def generate_account_from_mnemonic(self, mnemonic: str) -> dict:
         private_key, public_key = crypto_utils.generate_keys_from_mnemonic(mnemonic)
-        return {'address': '0b' + public_key[-40:], 'pub_key': public_key, 'private_key': private_key, 'mnemonic': mnemonic}
+        return {'address': '0z' + public_key[-40:], 'pub_key': public_key, 'private_key': private_key, 'mnemonic': mnemonic}
 
     def get_account_balance(self, address: str) -> dict:
         try:
