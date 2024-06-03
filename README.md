@@ -16,7 +16,7 @@ OMNE open source node
    cd omne-open-node
 ```
 
-### Environment Variables
+2. ### Setup Environment Variables
 
 Before running the project, ensure you have set the following environment variables:
 
@@ -24,7 +24,7 @@ Before running the project, ensure you have set the following environment variab
 export STEWARD_ADDRESS=<your_omne_address>
 ```
 
-2. **Trigger the GitHub Actions workflow to configure your node**
+3. ### Trigger the GitHub Actions workflow to configure your node
 
 After cloning the repository, you need to trigger the GitHub Actions workflow to set up your node's configuration. You can do this manually via the GitHub API or GitHub CLI.
 
@@ -40,17 +40,13 @@ https://api.github.com/repos/yourusername/omne-open-node/dispatches \
 -d '{"event_type":"setup-node"}'
 ```
 
-3. **Run Docker Compose**
+4. ### Run Docker Compose
 
 After the GitHub Actions workflow completes, you can run the Docker Compose setup:
 
 ```sh
 docker-compose up -d
 ```
-
-***Environment Variables***
-
-Ensure you have set up any necessary environment variables in your .env file or your system environment.
 
 ***Development***
 
@@ -88,3 +84,12 @@ Contributions are welcome! Please open issues and pull requests as needed.
 ### License
 
 This project is licensed under the MIT License. See the LICENSE file for more details.
+
+
+### Explanation
+
+1. **GitHub Actions Workflow**: The workflow only triggers on `repository_dispatch` with the event type `setup-node`.
+
+2. **README.md**: Updated to include instructions for triggering the GitHub Actions workflow manually after cloning the repository using either GitHub CLI or cURL.
+
+This ensures that the workflow only runs when explicitly triggered by the user, avoiding unnecessary runs on every push.

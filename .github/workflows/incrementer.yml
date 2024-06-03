@@ -1,11 +1,6 @@
 name: Open node iterator
 
 on:
-  push:
-    branches:
-      - master
-  release:
-    types: [created]
   repository_dispatch:
     types: [setup-node]
 
