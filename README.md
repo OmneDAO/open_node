@@ -12,7 +12,7 @@ OMNE open source node
 
 1. **Clone the repository**:
 ```sh
-   git clone https://github.com/yourusername/omne-open-node.git
+   git clone https://github.com/OmneDAO/open_node.git
    cd omne-open-node
 ```
 
