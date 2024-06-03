@@ -16,6 +16,14 @@ OMNE open source node
    cd omne-open-node
 ```
 
+### Environment Variables
+
+Before running the project, ensure you have set the following environment variables:
+
+```sh
+export STEWARD_ADDRESS=<your_omne_address>
+```
+
 2. **Trigger the GitHub Actions workflow to configure your node**
 
 After cloning the repository, you need to trigger the GitHub Actions workflow to set up your node's configuration. You can do this manually via the GitHub API or GitHub CLI.
