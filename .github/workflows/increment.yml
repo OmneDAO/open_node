@@ -1,0 +1,39 @@
+name: Open node iterator
+
+on:
+  push:
+    branches:
+      - main
+  release:
+    types: [created]
+
+jobs:
+  update-container-name:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Set up Node ID
+        id: node_id
+        run: echo "NODE_ID=$(date +%s%N | sha256sum | base64 | head -c 8)" >> $GITHUB_ENV
+
+      - name: Update container name and Python code
+        run: |
+          NODE_ID=${{ steps.node_id.outputs.NODE_ID }}
+          # Update docker-compose.yml
+          sed -i "s/container_name: node_placeholder.omne/container_name: node${NODE_ID}.omne/g" docker-compose.yml
+          
+          # Update the Oracle class initialization in open_node.py
+          sed -i "s/current_node_url=\"http:\/\/current-node-url:3400\"/current_node_url=\"http:\/\/node${NODE_ID}.omne:3400\"/g" app/open_node.py
+          
+          # Update the Node class initialization in open_node.py
+          sed -i "s/self.current_node_url = \"http:\/\/current-node-url:3400\"/self.current_node_url = \"http:\/\/node${NODE_ID}.omne:3400\"/g" app/open_node.py
+
+          # Commit changes
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git add docker-compose.yml app/open_node.py
+          git commit -m "Update container name and node URL to node${NODE_ID}.omne"
+          git push
