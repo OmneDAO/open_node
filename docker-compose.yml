@@ -20,7 +20,7 @@ services:
       track: continuous
     environment:
       - PYTHONPATH=/app
-      - STEWARD_ADDRESS=${STEWARD_ADDRESS}  # Add this line
+      - STEWARD_ADDRESS=${STEWARD_ADDRESS}
     stdin_open: true
     tty: true
 
