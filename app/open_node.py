@@ -3912,12 +3912,12 @@ def retrieve_init_date():
 # Calculate tx hash
 @app.route('/calculate_hash', methods=['POST'])
 def hash_transaction():
-    json_ = request.get_json()
+    data = request.get_json()
     if not data:
         return jsonify({'error': 'No data provided'}), 400
 
     try:
-        hash_result = crypto_utils.calculate_sha256_hash(json_['tx'])
+        hash_result = crypto_utils.calculate_sha256_hash(data['tx'])
         return jsonify({'hash': hash_result}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
