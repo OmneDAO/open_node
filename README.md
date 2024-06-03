@@ -13,7 +13,9 @@ OMNE open source node
 1. **Clone the repository**:
 ```sh
    git clone https://github.com/OmneDAO/open_node.git
-   cd omne-open-node
+```
+```sh
+   cd open-node
 ```
 
 2. ### Setup Environment Variables
