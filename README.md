@@ -15,18 +15,24 @@ OMNE open source node
 1. **Clone the repository**:
 ```sh
    git clone https://github.com/OmneDAO/open_node.git
+```
+```sh
    cd open_node
 ```
 
-2. **Set up the node**:
+2. **Make the setup script executable**:
+```sh
+chmod +x setup_node.sh
+```
+
+3. **Set up the node**:
 Run the setup script to configure your node:
 
 ```sh
 ./setup_node.sh
 ```
 
-3. **Run Docker Compose**:
-
+4. **Run Docker Compose**:
 After the setup script completes, you can run the Docker Compose setup:
 
 ```sh
