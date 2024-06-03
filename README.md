@@ -1,4 +1,5 @@
 # OMNE Open Node Project
+
 OMNE open source node
 
 ## Setup Instructions
@@ -7,44 +8,26 @@ OMNE open source node
 
 - Docker
 - Docker Compose
+- Omne wallet address (use the https://phaylos.xyz mobile wallet to create a wallet address if you do not have one already)
 
 ### Getting Started
 
 1. **Clone the repository**:
 ```sh
    git clone https://github.com/OmneDAO/open_node.git
-```
-```sh
    cd open_node
 ```
 
-2. ### Setup Environment Variables
-
-Before running the project, ensure you have set the following environment variables:
+2. **Set up the node**:
+Run the setup script to configure your node:
 
 ```sh
-export STEWARD_ADDRESS=<your_omne_address>
+./setup_node.sh
 ```
 
-3. ### Trigger the GitHub Actions workflow to configure your node
+3. **Run Docker Compose**:
 
-After cloning the repository, you need to trigger the GitHub Actions workflow to set up your node's configuration. You can do this manually via the GitHub API or GitHub CLI.
-
-***Using GitHub CLI***
-```sh
-gh workflow run open-node-iterator.yml --repo yourusername/omne-open-node --ref main --field event_type=setup-node
-```
-***Using cURL***
-```sh
-curl -X POST -H "Accept: application/vnd.github.v3+json" \
--H "Authorization: token YOUR_GITHUB_TOKEN" \
-https://api.github.com/repos/yourusername/omne-open-node/dispatches \
--d '{"event_type":"setup-node"}'
-```
-
-4. ### Run Docker Compose
-
-After the GitHub Actions workflow completes, you can run the Docker Compose setup:
+After the setup script completes, you can run the Docker Compose setup:
 
 ```sh
 docker-compose up -d
@@ -75,7 +58,7 @@ These steps allow you to develop and test the node without needing Docker. Howev
 
 ***Notes***
 
-- The GitHub Actions workflow automatically updates the node's configuration, including the container name and port number.
+- The setup script automatically updates the node's configuration, including the container name and port number.
 
 
 ### Contributing
@@ -90,8 +73,8 @@ This project is licensed under the MIT License. See the LICENSE file for more de
 
 ### Explanation
 
-1. **GitHub Actions Workflow**: The workflow only triggers on `repository_dispatch` with the event type `setup-node`.
+1. **`setup_node.sh` script**: This script performs the necessary setup steps locally. It generates a unique node ID, calculates a port number, and updates the relevant configuration files.
 
-2. **README.md**: Updated to include instructions for triggering the GitHub Actions workflow manually after cloning the repository using either GitHub CLI or cURL.
+2. **README.md**: README.md: Updated to include instructions for running the setup script and starting the Docker container.
 
-This ensures that the workflow only runs when explicitly triggered by the user, avoiding unnecessary runs on every push.
+By running the `setup_node.sh` script, users will be able to configure and run their node without needing administrative rights on the repository.
