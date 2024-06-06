@@ -57,11 +57,11 @@ from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 from bson.objectid import ObjectId
 
-HASH_API_URL = "http://localhost:3000/hashes"
+HASH_API_URL = "http://hash-api:3000/hashes"
 
 def fetch_auth_token():
     try:
-        response = requests.get(f"{HASH_API_URL}/auth-token")
+        response = requests.get("http://hash-api:3000/auth-token")
         if response.status_code != 200:
             raise ValueError("Failed to fetch auth token from public API.")
         data = response.json()
@@ -3452,6 +3452,27 @@ def validate_date(date_text):
         return False
 
 #==== ACCOUNT OPS ====#
+
+# Create new wallet
+@app.route('/create_account', methods=['GET'])
+@require_authentication
+def generate_account_from_mnemonic():
+
+    o = blockchain.create_new_wallet()
+
+    # Construct sendable_account dictionary
+    sendable_account = {
+        'mnemonic': o['mnemonic'],
+        'private_key': o['private_key'],
+        'pub_key': o['pub_key'],
+        'address': o['address']
+    }
+
+    response = {
+        'message': 'Account generated successfully',
+        'account': sendable_account
+    }
+    return jsonify(response), 200
 
 #Create new wallet from owned seed phrase
 @app.route('/create_another_account', methods=['POST'])
