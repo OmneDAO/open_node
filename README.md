@@ -14,19 +14,41 @@ OMNE open source node
 
 ### Installing `sha256sum` on macOS
 
+**Windows**
+
+To install `sha256sum` on Windows, you can use Git Bash or install the GNU Core Utilities for Windows:
+
+1. Using Git Bash:
+
+   - If you have Git for Windows installed, you can use the sha256sum command from Git Bash.
+
+2. Using GNU Core Utilities:
+
+   - Download the GNU Core Utilities from GnuWin32.
+   - Install the package and add the installation path to your system's PATH environment variable.
+
+**macOS**
+
 If you're on macOS, you might need to install `coreutils` to get `sha256sum`:
 
 ```sh
 brew install coreutils
 ```
 
-**After installation, you might need to add the coreutils binaries to your PATH**:
+After installation, you might need to add the coreutils binaries to your PATH:
 
 ```sh
 echo 'export PATH="/usr/local/opt/coreutils/libexec/gnubin:$PATH"' >> ~/.zshrc
 ```
 ```sh
 source ~/.zshrc
+```
+**Linux**
+
+Most Linux distributions have `sha256sum` pre-installed. You can verify its installation by running:
+
+```sh
+sha256sum --version
 ```
 
 ### Getting Started
@@ -100,6 +122,8 @@ This project is licensed under the MIT License. See the LICENSE file for more de
 
 1. **`setup_node.sh` script**: This script performs the necessary setup steps locally. It generates a unique node ID, calculates a port number, and updates the relevant configuration files.
 
-2. **README.md**: README.md: Updated to include instructions for running the setup script and starting the Docker container.
+
+
+2. **`entrypoint.sh` script**: This script is used in the Docker container to ensure all necessary steps are completed before running the node. It verifies class hashes to ensure the integrity of the codebase and initializes the node.
 
 By running the `setup_node.sh` script, users will be able to configure and run their node without needing administrative rights on the repository.
