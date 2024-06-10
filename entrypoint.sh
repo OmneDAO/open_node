@@ -11,7 +11,7 @@ python3 - << EOF
 import logging
 import sys
 sys.path.insert(0, '/app')
-from node_two import Ledger  # Adjust the import to match your actual module
+from open_node import Ledger  # Adjust the import to match your actual module
 
 try:
     if Ledger.verify_class_hashes():
@@ -33,7 +33,7 @@ fi
 # Initialize the necessary objects for the ledger and consensus
 python3 - << EOF
 import logging
-from node_two import Ledger, SWRVS, Verifier, Oracle, OMC, Node, Wallet, Transactions, Treasury
+from open_node import Ledger, SWRVS, Verifier, Oracle, OMC, Node, Wallet, Transactions, Treasury
 
 # Initialize the necessary objects
 oracle = Oracle(api_key="your_api_key")

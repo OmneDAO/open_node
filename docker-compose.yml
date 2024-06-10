@@ -10,7 +10,7 @@ services:
       - "3401:3400"
     networks:
       - node_one_omne-net
-      - hash-api-net
+      - node_one_hash-api-net
     volumes:
       - ./app:/app
     labels:
@@ -28,5 +28,5 @@ services:
 networks:
   node_one_omne-net:
     external: true
-  hash-api-net:
+  node_one_hash-api-net:
     external: true

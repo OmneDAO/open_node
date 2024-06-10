@@ -593,10 +593,10 @@ class TransferRequest:
         self.permission_sig = permission_sig
 
 class OMC:
-    def __init__(self, oracle, rebaser):
+    def __init__(self, oracle):
         self.init_date = datetime.now(timezone.utc)
         self.accounts = []
-        self.name = 'Medivolve Coin'
+        self.name = 'Omne Coin'
         self.symbol = 'OMC'
         self.decimals = 18
         self.cge_base = 13300000
@@ -605,7 +605,7 @@ class OMC:
         self.circulating_supply = 0.0
         self.treasury_address = "0x123"
         self.oracle = oracle
-        self.rebaser = rebaser
+        self.rebaser = None  # Initialize rebaser as None
         self.last_known_price = None
         self.balance_lock = threading.Lock()
         self.total_staked = 0.0
@@ -614,6 +614,9 @@ class OMC:
         self.staked_coins = []
 
         self.fetch_current_price_from_oracle()
+
+    def set_rebaser(self, rebaser):
+        self.rebaser = rebaser
 
     def get_balance(self, address):
         with self.balance_lock:
@@ -701,8 +704,8 @@ class OMC:
         self.oracle.broadcast_price_data(price)
 
 class Rebaser:
-    def __init__(self, omc, target_price=1.00, price_band=(0.87, 1.10), price_change_threshold=0.02, rebase_interval_minutes=60):
-        self.omc = omc
+    def __init__(self, coin, target_price=1.00, price_band=(0.87, 1.10), price_change_threshold=0.02, rebase_interval_minutes=60):
+        self.coin = coin
         self.target_price = target_price
         self.price_band = price_band
         self.price_change_threshold = price_change_threshold
@@ -714,9 +717,9 @@ class Rebaser:
         self.monitor_thread.start()
 
     def should_rebase(self, new_price):
-        if self.omc.last_known_price is None:
+        if self.coin.last_known_price is None:
             return True
-        price_change = abs(new_price - self.omc.last_known_price) / self.omc.last_known_price
+        price_change = abs(new_price - self.coin.last_known_price) / self.coin.last_known_price
         return price_change >= self.price_change_threshold
 
     def calculate_rebase_factor(self, current_price):
@@ -729,23 +732,23 @@ class Rebaser:
         return 1.0
 
     def rebase(self, new_price):
-        with self.omc.lock:
+        with self.coin.balance_lock:
             if self.should_rebase(new_price):
                 rebase_factor = self.calculate_rebase_factor(new_price)
-                for address in list(self.omc.balance):
-                    self.omc.balance[address] *= rebase_factor
-                self.omc.circulating_supply *= rebase_factor
-                self.omc.last_known_price = new_price
-                logging.info(f"Rebase executed. New supply: {self.omc.circulating_supply}, Rebase factor: {rebase_factor}")
-                self.omc.broadcast_price_data(new_price)
+                for address in list(self.coin.balance):
+                    self.coin.balance[address] *= rebase_factor
+                self.coin.circulating_supply *= rebase_factor
+                self.coin.last_known_price = new_price
+                logging.info(f"Rebase executed. New supply: {self.coin.circulating_supply}, Rebase factor: {rebase_factor}")
+                self.coin.broadcast_price_data(new_price)
 
     def background_monitoring(self):
         while True:
             try:
                 current_time = time.time()
                 if current_time - self.last_rebase_time >= self.rebase_interval_minutes * 60:
-                    current_price = self.omc.fetch_current_price_from_oracle()
-                    if current_price and not self.omc.is_within_band(current_price):
+                    current_price = self.coin.fetch_current_price_from_oracle()
+                    if current_price and not self.coin.is_within_band(current_price):
                         self.rebase(current_price)
                         self.last_rebase_time = current_time
                 time.sleep(60)
@@ -2741,8 +2744,11 @@ merkle_tree = MerkleTree()
 
 permission_manager = PermissionMngr()
 
-# Create coin
-coin = OMC()
+# Initialize the Oracle class
+oracle = Oracle()
+
+# Initialize the OMC class
+coin = OMC(oracle)
 
 account_manager = AccMngr()
 
