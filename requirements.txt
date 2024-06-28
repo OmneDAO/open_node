@@ -20,3 +20,5 @@ python-slugify
 requests
 rsa
 stripe
+pqcrypto
+dimod
