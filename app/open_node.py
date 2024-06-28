@@ -57,10 +57,6 @@ from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 from bson.objectid import ObjectId
 
-from dwave.system import DWaveSampler, EmbeddingComposite
-import pqcrypto.sign.dilithium2 as pqsign
-from dimod import ExactSolver
-
 HASH_API_URL = "http://hash-api:3000/hashes"
 
 def fetch_auth_token():
@@ -1497,22 +1493,7 @@ class Ledger:
         synchronized_chain = None
         authoritative_node_url = None
 
-        if not services:
-            logging.warning("No services available for synchronization.")
-            return authoritative_node_url, synchronized_chain
-
-        # Prepare data for quantum-inspired TSP solver
-        distances = self.calculate_distances(services)
-
-        # Quantum-inspired optimization to find the optimal synchronization path
-        sampler = ExactSolver()
-        response = sampler.sample_qubo(self.construct_tsp_qubo(distances))
-
-        # Extract the best path from the response
-        best_path = list(response.samples())[0]
-
-        for i in best_path:
-            service = services[i]
+        for service in services:
             service_base_url = f"http://{service}:3400"
             service_url = f"{service_base_url}/get_chain"
 
@@ -1522,7 +1503,7 @@ class Ledger:
             try:
                 response = requests.get(service_url)
                 if response.status_code == 200:
-                    other_chain = response.json().get("chain", [])
+                    other_chain = response.json()["chain"]
                     if len(other_chain) > my_chain_length:
                         my_chain_length = len(other_chain)
                         synchronized_chain = other_chain
@@ -1534,27 +1515,6 @@ class Ledger:
             self.chain = synchronized_chain
 
         return authoritative_node_url, synchronized_chain
-
-    def calculate_distances(self, services):
-        # Calculate distances between services (e.g., based on response times)
-        distances = {}
-        for i, service_i in enumerate(services):
-            for j, service_j in enumerate(services):
-                if i != j:
-                    distance = self.get_distance_between_services(service_i, service_j)
-                    distances[(i, j)] = distance
-        return distances
-
-    def construct_tsp_qubo(self, distances):
-        # Construct QUBO matrix for TSP problem
-        qubo = {}
-        for (i, j), distance in distances.items():
-            qubo[(i, j)] = distance
-        return qubo
-
-    def get_distance_between_services(self, service_i, service_j):
-        # Simulate distance calculation (e.g., response time)
-        return random.uniform(1, 10)
 
     def broadcast_node_data(self, node):
         headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
@@ -2551,30 +2511,9 @@ class SWRVS:
             logging.warning("No validators available.")
             return None
 
-        # Prepare data for quantum-inspired optimization
-        stake_weights = [node['stake_weight'] if isinstance(node, dict) else node.stake_weight for node in self.node.nodes]
-        total_stake_weight = sum(stake_weights)
-        normalized_weights = [weight / total_stake_weight for weight in stake_weights]
-
-        # Quantum-inspired optimization to select validator
-        sampler = EmbeddingComposite(DWaveSampler())
-        response = sampler.sample_qubo(self.construct_qubo(normalized_weights), num_reads=10)
-
-        best_sample = min(response, key=lambda sample: sample.energy)
-        selected_index = list(best_sample.keys()).index(1)
-
-        validator_address = self.node.nodes[selected_index]['address'] if isinstance(self.node.nodes[selected_index], dict) else self.node.nodes[selected_index].address
-        logging.info(f"Selected validator address: {validator_address}")
+        validator_address = random.choice(self.validators)
+        logging.info(f"Randomly selected validator address: {validator_address}")
         return validator_address
-
-    def construct_qubo(self, weights):
-        # Construct QUBO matrix for quantum optimization
-        qubo = {}
-        for i in range(len(weights)):
-            qubo[(i, i)] = weights[i] * (1 - weights[i])
-            for j in range(i + 1, len(weights)):
-                qubo[(i, j)] = -2 * weights[i] * weights[j]
-        return qubo
 
     def trigger_sync_on_all_nodes(self):
         services = self.node.ledger.discover_services("node")
