@@ -112,53 +112,6 @@ class DynamicFeeCalculator:
         # Return the cost and the hash
         return cost, transaction_hash
 
-class Oracle:
-    def __init__(self, api_key=None, current_node_url="http://current-node-url:3400"):
-        self.current_node_url = current_node_url
-        self.services = self.discover_services("node")
-
-    def fetch_price(self):
-        # Discover services if not already discovered
-        if not self.services:
-            self.services = self.discover_services("node")
-
-        # Attempt to fetch price from each discovered service
-        for service in self.services:
-            try:
-                url = f"http://{service}:3400/get_latest_price"
-                response = requests.get(url)
-                if response.status_code == 200:
-                    data = response.json()
-                    usd_to_other_currency = data.get("price", None)
-                    if usd_to_other_currency is not None:
-                        return usd_to_other_currency
-                    else:
-                        logging.error("Currency data not found in the response.")
-                else:
-                    logging.error(f"Failed to fetch currency data from {service}. Status code: {response.status_code}")
-            except Exception as e:
-                logging.error(f"Error fetching currency data from {service}: {e}")
-
-        raise ValueError("Error fetching currency data from all available nodes.")
-
-    def discover_services(self, prefix):
-        discovered_services = []
-        max_range = 10
-
-        for i in range(1, max_range):
-            service_name = f"{prefix}{i}.omne"
-            try:
-                service_address = socket.gethostbyname(service_name)
-                if service_address != self.current_node_url:
-                    discovered_services.append(service_name)
-                    logging.debug(f"Discovered service: {service_name}")
-            except socket.gaierror:
-                continue
-
-        if not discovered_services:
-            logging.warning("No services were discovered.")
-        return discovered_services
-
 class Verifier:
     def __init__(self):
         self.verified_nodes = []
@@ -593,69 +546,119 @@ class TransferRequest:
         self.permission_sig = permission_sig
 
 class OMC:
-    def __init__(self, oracle):
+    def __init__(self, initial_supply=0.0):
+        getcontext().prec = 18
         self.init_date = datetime.now(timezone.utc)
-        self.accounts = []
         self.name = 'Omne Coin'
         self.symbol = 'OMC'
         self.decimals = 18
         self.cge_base = 13300000
         self.initial_supply = self.cge_base * (10 ** self.decimals)
         self.balance = {}
+        self.id = "0z3ffd5d95e8b870eb1812caf03833b9ea8eadaeb7"
         self.circulating_supply = 0.0
-        self.treasury_address = "0x123"
-        self.oracle = oracle
-        self.rebaser = None  # Initialize rebaser as None
-        self.last_known_price = None
-        self.balance_lock = threading.Lock()
         self.total_staked = 0.0
         self.total_minted = 0
         self.total_burned = 0
         self.staked_coins = []
+        self.balance_lock = threading.Lock()
 
-        self.fetch_current_price_from_oracle()
+    def transfer(self, from_address, to_address, amount):
+        with self.balance_lock:
+            if from_address not in self.balance:
+                raise ValueError("Sender address does not exist")
 
-    def set_rebaser(self, rebaser):
-        self.rebaser = rebaser
+            if self.balance[from_address] >= amount:
+                self.balance[from_address] -= amount
+
+                if to_address not in self.balance:
+                    self.balance[to_address] = Decimal(0)
+
+                self.balance[to_address] += Decimal(amount)
+
+                timestamp = datetime.now(timezone.utc).isoformat()
+                cursor = self.db_connection.cursor()
+                cursor.execute("INSERT INTO transfer_history (timestamp, from_address, to_address, amount) VALUES (?, ?, ?, ?)",
+                            (timestamp, from_address, to_address, amount))
+                self.db_connection.commit()
+
+                return True
+            else:
+                raise ValueError("Insufficient balance for transfer")
+
+    @staticmethod
+    def generate_request_id():
+        random_number = secrets.randbelow(10**40)
+        cryptographic_number = f'0r{random_number:040d}'
+        return cryptographic_number
 
     def get_balance(self, address):
         with self.balance_lock:
             return self.balance.get(address, Decimal(0))
 
-    def fetch_current_price_from_oracle(self):
-        return self.oracle.fetch_price()
+    def background_monitoring(self):
+        while True:
+            current_time = time.time()
+            time.sleep(60)
 
-    def is_within_band(self, price):
-        return self.rebaser.price_band[0] <= price <= self.rebaser.price_band[1]
+    def get_transfer_history(self):
+        cursor = self.db_connection.cursor()
+        cursor.execute("SELECT * FROM transfer_history ORDER BY timestamp")
+        rows = cursor.fetchall()
+        transfer_history = [{
+            'timestamp': row[0],
+            'from_address': row[1],
+            'to_address': row[2],
+            'amount': row[3]
+        } for row in rows]
 
-    def transfer(self, from_address, to_address, amount):
+        return transfer_history
+
+    def report_coin_status(self):
         with self.balance_lock:
-            if self.balance.get(from_address, 0) >= amount:
-                fee = amount * 0.01
-                self.balance[from_address] -= amount
-                self.balance[to_address] = self.balance.get(to_address, 0) + (amount - fee)
-                self.balance[self.treasury_address] += fee
-                logging.info(f"Transferred {amount - fee} from {from_address} to {to_address}. Fee {fee} to treasury.")
-                return True
-            else:
-                logging.error("Insufficient balance for transfer")
-                return False
+            return {
+                'circulating_supply': str(self.circulating_supply),
+                'number_of_addresses': len(self.balance)
+            }
 
-    def mint_coins(self, to_address, amount):
+    def credit(self, address: str, amount: int):
+        if address not in self.balance:
+            self.balance[address] = 0
+        self.balance[address] += amount
+        self.other_activity_history.append({"sender": None, "recipient": address, "amount": amount})
+
+    def debit(self, address: str, amount: int):
+        if address not in self.balance:
+            raise ValueError("Account not found")
+        if self.balance[address] < amount:
+            raise ValueError("Insufficient balance for debit")
+        self.balance[address] -= amount
+        self.other_activity_history.append({"sender": address, "recipient": None, "amount": amount})
+
+    def mint_coins_and_send(self, to_address, amount):
+        if amount <= 0:
+            raise ValueError("Amount must be a positive value")
+
         with self.balance_lock:
-            fee = amount * 0.01
-            self.balance[to_address] = self.balance.get(to_address, 0) + (amount - fee)
-            self.balance[self.treasury_address] += fee
+            if self.circulating_supply >= self.coin_max:
+                raise ValueError("Peak supply has been reached. No more minting allowed.")
+
+            if self.coin_max - self.circulating_supply < amount:
+                raise ValueError("Not enough supply for minting")
+
+            if to_address not in self.balance:
+                self.balance[to_address] = 0
+
+            self.balance[to_address] += amount
             self.circulating_supply += amount
-            self.total_minted += amount
-            logging.info(f"Minted {amount - fee} to {to_address}. Fee {fee} to treasury.")
+            self.minting_history.append((to_address, amount))
+
             return True
 
     def burn_coins(self, amount):
         burn_address = "0z0000000000000000000000000000000000000000"
         with self.balance_lock:
             if self.circulating_supply >= amount * (10 ** self.decimals):
-                # Remove the amount from the total circulating supply
                 self.circulating_supply -= amount * (10 ** self.decimals)
                 self.total_burned += amount * (10 ** self.decimals)
                 logging.info(f"Burned {amount} coins, transferred to burn address {burn_address}.")
@@ -664,96 +667,11 @@ class OMC:
                 logging.error("Insufficient circulating supply for burn")
                 return False
 
-    def report_coin_economy(self):
-        normalized_circulating_supply = self.circulating_supply / (10 ** self.decimals)
-        normalized_total_minted = self.total_minted / (10 ** self.decimals)
-        normalized_total_burned = self.total_burned / (10 ** self.decimals)
-
-        if self.last_known_price is not None:
-            conversion_rate = f" ${self.last_known_price}"
-        else:
-            conversion_rate = "Current price not available"
-
-        return {
-            'circulating_supply_raw': str(self.circulating_supply),
-            'circulating_supply_normalized': str(normalized_circulating_supply),
-            'total_minted': str(normalized_total_minted),
-            'total_burned': str(normalized_total_burned),
-            'current_conversion_rate': conversion_rate
-        }
-
-    def mint_for_block_fee(self, base_amount, transaction_fee):
-        adjustment_factor = 0.08
-        base_fee = 47
-
-        if transaction_fee > base_fee:
-            percent_increase = ((transaction_fee - base_fee) / base_fee) * 100
-            number_of_adjustments = percent_increase // 5
-            for _ in range(int(number_of_adjustments)):
-                base_amount *= (1 - adjustment_factor)
-
-        with self.balance_lock:
-            self.balance[self.treasury_address] += base_amount
-            self.circulating_supply += base_amount
-            self.total_minted += base_amount
-            logging.info(f"Minted {base_amount} to treasury for block fee purposes.")
-
-        return base_amount
-
-    def broadcast_price_data(self, price):
-        self.oracle.broadcast_price_data(price)
-
-class Rebaser:
-    def __init__(self, coin, target_price=1.00, price_band=(0.87, 1.10), price_change_threshold=0.02, rebase_interval_minutes=60):
-        self.coin = coin
-        self.target_price = target_price
-        self.price_band = price_band
-        self.price_change_threshold = price_change_threshold
-        self.rebase_interval_minutes = rebase_interval_minutes
-        self.last_rebase_time = time.time()
-
-        self.monitor_thread = threading.Thread(target=self.background_monitoring)
-        self.monitor_thread.daemon = True
-        self.monitor_thread.start()
-
-    def should_rebase(self, new_price):
-        if self.coin.last_known_price is None:
-            return True
-        price_change = abs(new_price - self.coin.last_known_price) / self.coin.last_known_price
-        return price_change >= self.price_change_threshold
-
-    def calculate_rebase_factor(self, current_price):
-        if current_price > self.target_price:
-            percentage_change = (current_price - self.target_price) / self.target_price
-            return max(0.5, min(2.0, (1 + percentage_change ** 0.5)))
-        elif current_price < self.target_price:
-            percentage_change = (self.target_price - current_price) / self.target_price
-            return max(0.5, min(2.0, (1 - percentage_change ** 0.5)))
-        return 1.0
-
-    def rebase(self, new_price):
-        with self.coin.balance_lock:
-            if self.should_rebase(new_price):
-                rebase_factor = self.calculate_rebase_factor(new_price)
-                for address in list(self.coin.balance):
-                    self.coin.balance[address] *= rebase_factor
-                self.coin.circulating_supply *= rebase_factor
-                self.coin.last_known_price = new_price
-                logging.info(f"Rebase executed. New supply: {self.coin.circulating_supply}, Rebase factor: {rebase_factor}")
-                self.coin.broadcast_price_data(new_price)
-
-    def background_monitoring(self):
-        while True:
-            try:
-                current_time = time.time()
-                if current_time - self.last_rebase_time >= self.rebase_interval_minutes * 60:
-                    current_price = self.coin.fetch_current_price_from_oracle()
-                    if current_price and not self.coin.is_within_band(current_price):
-                        self.rebase(current_price)
-                        self.last_rebase_time = current_time
-                time.sleep(60)
-            except Exception as e:
-                logging.error(f"Background monitoring error: {e}")
+    @staticmethod
+    def is_valid_address(address):
+        if not re.match(r'^0b[0-9a-fA-F]{40}$', address):
+            return False
+        return True
 
 class AccMngr:
     def __init__(self):
@@ -2744,11 +2662,8 @@ merkle_tree = MerkleTree()
 
 permission_manager = PermissionMngr()
 
-# Initialize the Oracle class
-oracle = Oracle()
-
 # Initialize the OMC class
-coin = OMC(oracle)
+coin = OMC()
 
 account_manager = AccMngr()
 
