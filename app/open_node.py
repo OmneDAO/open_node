@@ -1623,6 +1623,19 @@ class Ledger:
                             coin.balance[new_acc['address']] = new_acc['balance']
                             logging.info(f"Added new main account {new_acc['address']} for {coin.name}.")
 
+                precursor_accounts = data.get('precursor_accounts', [])
+                for new_acc in precursor_accounts:
+                    if 'address' in new_acc and 'balance' in new_acc:
+                        account = next((acc for acc in account_manager.precursor_accounts if acc['address'] == new_acc['address']), None)
+                        if account:
+                            account['balance'] = new_acc['balance']
+                            coin.balance[new_acc['address']] = new_acc['balance']
+                            logging.info(f"Updated precursor account {new_acc['address']} for {coin.name}.")
+                        else:
+                            account_manager.precursor_accounts.append(new_acc)
+                            coin.balance[new_acc['address']] = new_acc['balance']
+                            logging.info(f"Added new precursor account {new_acc['address']} for {coin.name}.")
+
                 staking_accounts = data.get('staking_accounts', [])
                 for new_acc in staking_accounts:
                     if 'address' in new_acc and 'min_term' in new_acc:
@@ -2923,11 +2936,35 @@ def decrypt_data(encrypted_data, private_key_path):
 
     return decrypted_data
 
-# Retrieve NonIterableList data
-@app.route('/get_account_list_data', methods=['GET'])
-def get_account_list_data():
-    account_list_data = account_manager.accounts
-    return jsonify({"account_list_data": account_list_data}), 200
+# Retrieve accounts
+@app.route('/retrieve_accounts', methods=['GET'])
+def retrieve_accounts():
+    try:
+        account_list_data = account_manager.accounts
+        precursor_accounts = account_manager.precursor_accounts
+        staking_accounts = staking_manager.staking_agreements
+        validators = ledger.validators
+
+        # Convert nodes to dictionaries; handle both Node objects and already dictionary nodes
+        nodes = []
+        for node in ledger.nodes:
+            if isinstance(node, Node):
+                nodes.append(node.to_dict())  # Convert Node object to dictionary using a method
+            elif isinstance(node, dict):
+                nodes.append(node)  # It's already a dictionary, append as is
+
+        response_data = {
+            'data': account_list_data,
+            'precursor_accounts': precursor_accounts,
+            'staking_accounts': staking_accounts,
+            'validators': validators,
+            'nodes': nodes
+        }
+
+        return jsonify(response_data), 200
+
+    except Exception as e:
+        return jsonify({"message": "Error retrieving accounts", "error": str(e)}), 500
 
 #==== CHAIN MAINTENANCE ====#
 
