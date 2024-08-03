@@ -20,6 +20,7 @@ import ecdsa
 import base64
 from base64 import b64encode
 import os
+import queue
 from mnemonic import Mnemonic
 from ecdsa.util import sigencode_der, sigdecode_der
 from cryptography.fernet import Fernet
@@ -57,6 +58,11 @@ from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 from bson.objectid import ObjectId
 
+from qiskit import QuantumCircuit, transpile, assemble
+from qiskit.visualization import plot_histogram
+from qiskit_aer import Aer
+from qiskit_aer import AerSimulator
+
 HASH_API_URL = "http://hash-api:3000/hashes"
 
 def fetch_auth_token():
@@ -83,6 +89,85 @@ class CustomEncoder(json.JSONEncoder):
         elif isinstance(obj, Decimal):
             return float(obj)
         return super().default(obj)
+
+class QuantumUtils:
+    @staticmethod
+    def quantum_random_bytes(num_bytes):
+        try:
+            logging.debug("Attempting to generate random bytes using os.urandom.")
+            random_bytes = os.urandom(num_bytes)
+            if not random_bytes:
+                raise ValueError("No random bytes generated using os.urandom")
+            logging.debug(f"Generated random bytes using os.urandom: {random_bytes.hex()}")
+            return random_bytes
+        except Exception as e:
+            logging.error(f"Error in quantum_random_bytes using os.urandom: {e}")
+            try:
+                logging.debug("Falling back to generate random bytes using secrets.token_bytes.")
+                random_bytes = secrets.token_bytes(num_bytes)
+                if not random_bytes:
+                    raise ValueError("No random bytes generated using secrets.token_bytes")
+                logging.debug(f"Generated random bytes using secrets.token_bytes: {random_bytes.hex()}")
+                return random_bytes
+            except Exception as e:
+                logging.error(f"Error in quantum_random_bytes using secrets.token_bytes: {e}")
+                raise ValueError("Failed to generate random bytes with both os.urandom and secrets.token_bytes")
+
+    @staticmethod
+    def quantum_random_int(max_value):
+        if max_value < 0:
+            raise ValueError("max_value must be non-negative")
+        
+        try:
+            bits_needed = max_value.bit_length()
+            num_bytes = (bits_needed + 7) // 8
+            logging.debug(f"Number of bytes needed: {num_bytes}")
+
+            while True:
+                random_bytes = QuantumUtils.quantum_random_bytes(num_bytes)
+                random_int = int.from_bytes(random_bytes, 'big')
+                if random_int <= max_value:
+                    break
+
+            logging.debug(f"Quantum random int: {random_int} for max value: {max_value}")
+            return random_int
+        except Exception as e:
+            logging.error(f"Error in quantum_random_int: {e}")
+            raise
+
+    @staticmethod
+    def quantum_resistant_hash(data):
+        try:
+            data_bin = ''.join(format(ord(i), '08b') for i in data)
+            n = len(data_bin)
+            qubit_limit = 29  # Adjust based on the simulator's maximum capability
+            hash_result = ''
+
+            for i in range(0, n, qubit_limit):
+                chunk = data_bin[i:i+qubit_limit]
+                chunk_len = len(chunk)
+                qc = QuantumCircuit(chunk_len)
+                qc.h(range(chunk_len))
+
+                for j in range(chunk_len-1):
+                    qc.cx(j, j+1)
+
+                qc.measure_all()
+
+                simulator = AerSimulator()
+                transpiled_qc = transpile(qc, simulator)
+                result = simulator.run(transpiled_qc, shots=1).result()
+                counts = result.get_counts()
+                measured_data = max(counts, key=counts.get)
+                hash_result += measured_data
+
+            quantum_hash = hashlib.sha256(hash_result.encode()).hexdigest()
+            logging.debug(f"Quantum resistant hash: {quantum_hash}")
+            return quantum_hash
+
+        except Exception as e:
+            logging.error(f"Error in quantum_resistant_hash: {e}")
+            raise
 
 class DynamicFeeCalculator:
     def __init__(self):
@@ -111,10 +196,10 @@ class DynamicFeeCalculator:
 
         # Return the cost and the hash
         return cost, transaction_hash
-
+        
 class Verifier:
     def __init__(self):
-        self.verified_nodes = []
+        self.nodes = []
         self.staking_agreements = []
 
     def update_staking_agreements(self, staking_agreements):
@@ -165,7 +250,7 @@ class Verifier:
         return total_withdrawals
 
     def calculate_stake_weights(self):
-        for node in self.verified_nodes:
+        for node in self.nodes:
             stake_weight = self.calculate_stake_weight_for_node(node)
             if isinstance(node, Node):
                 node.stake_weight = stake_weight
@@ -218,18 +303,22 @@ class Verifier:
         return True
 
     def select_validator(self, block):
-        self.calculate_stake_weights()  # Make sure this updates the stake weights in self.verified_nodes
+        self.calculate_stake_weights()  # Make sure this updates the stake weights in self.nodes
 
         # Corrected the sum to properly handle both dict and Node instances
-        total_stake_weight = sum(node['stake_weight'] if isinstance(node, dict) else node.stake_weight for node in self.verified_nodes)
-        random_number = random.uniform(0, total_stake_weight)
+        total_stake_weight = sum(node['stake_weight'] if isinstance(node, dict) else node.stake_weight for node in self.nodes)
+        
+        # Use quantum random integer instead of uniform
+        max_value = int(total_stake_weight * 1000)  # Scale up to ensure sufficient granularity
+        quantum_random_number = QuantumUtils.quantum_random_int(max_value) / 1000  # Scale down to original range
+
         cumulative_stake_weight = 0
 
-        for node in self.verified_nodes:
+        for node in self.nodes:
             node_stake_weight = node['stake_weight'] if isinstance(node, dict) else node.stake_weight
             cumulative_stake_weight += node_stake_weight
 
-            if cumulative_stake_weight > random_number:
+            if cumulative_stake_weight > quantum_random_number:
                 return node
 
         logging.warning("No validator was selected, returning None.")
@@ -237,11 +326,12 @@ class Verifier:
 
 class CUtils:
     def __init__(self):
-        u = {}
+        pass
 
     @staticmethod
     def generate_mnemonic():
-        mnemonic = Mnemonic('english').generate(strength=128)
+        entropy = quantum_utils.quantum_random_bytes(16)  # Using 16 bytes for 128 bits of entropy
+        mnemonic = Mnemonic('english').to_mnemonic(entropy)
         return mnemonic
 
     @staticmethod
@@ -258,43 +348,21 @@ class CUtils:
 
     @staticmethod
     def sign_transaction(private_key_bytes: bytes, transaction: dict) -> str:
-        """
-        Sign a transaction using the private key bytes after hashing the transaction data.
-        Returns the signature as a hexadecimal string.
-        """
-        # Convert the private key bytes to a SigningKey object
         private_key = ecdsa.SigningKey.from_string(private_key_bytes, curve=ecdsa.SECP256k1)
-
-        # Serialize the transaction data and sort keys
         transaction_data_str = json.dumps(transaction, sort_keys=True, cls=CustomEncoder)
-
-        # Hash the serialized transaction data using SHA256
         transaction_data_hash = hashlib.sha256(transaction_data_str.encode('utf-8')).digest()
-
-        # Sign the hashed transaction data
-        signature = private_key.sign(transaction_data_hash, sigencode=sigencode_der)
-
-        # Return the signature as a hexadecimal string
+        signature = private_key.sign(transaction_data_hash, sigencode=ecdsa.util.sigencode_der)
         return signature.hex()
 
     @staticmethod
     def verify_transaction(public_key_str, transaction, signature_base64):
         try:
-            # Convert the public key from hex to a VerifyingKey
             public_key_bytes = bytes.fromhex(public_key_str)
             verifying_key = ecdsa.VerifyingKey.from_string(public_key_bytes, curve=ecdsa.SECP256k1)
-
-            # Serialize transaction data for hashing, ensuring keys are sorted for consistent hashing
             transaction_data_str = json.dumps(transaction, sort_keys=True)
-
-            # Create a SHA256 hash of the serialized transaction data
-            transaction_data_hash = sha256(transaction_data_str.encode('utf-8')).digest()
-
-            # Decode the base64 signature to bytes
+            transaction_data_hash = hashlib.sha256(transaction_data_str.encode('utf-8')).digest()
             signature_bytes = base64.b64decode(signature_base64)
-
-            # Verify the signature against the hash of the transaction data
-            if verifying_key.verify(signature_bytes, transaction_data_hash, hashfunc=sha256, sigdecode=ecdsa.util.sigdecode_der):
+            if verifying_key.verify(signature_bytes, transaction_data_hash, hashfunc=hashlib.sha256, sigdecode=ecdsa.util.sigdecode_der):
                 return True, "Signature verified"
             else:
                 return False, "Signature does not match"
@@ -305,23 +373,15 @@ class CUtils:
 
     @staticmethod
     def decrypt_val(cipher_text, hex_key):
-        # Convert hex string to byte array
         key = bytes.fromhex(hex_key)
-
-        # Ensure the key is of valid length (16, 24, or 32 bytes)
         if len(key) not in [16, 24, 32]:
             raise ValueError("Incorrect AES key length (%d bytes)" % len(key))
-
         decipher = AES.new(key, AES.MODE_ECB)
         decrypted_text = decipher.decrypt(base64.b64decode(cipher_text))
         return decrypted_text.strip().decode('utf-8')
 
     @staticmethod
     def calculate_sha256_hash(transaction: dict) -> str:
-        """
-        Calculate the SHA256 hash of a transaction dictionary.
-        Returns the hash as a hexadecimal string.
-        """
         transaction_string = json.dumps(transaction, sort_keys=True)
         hash_object = hashlib.sha256(transaction_string.encode())
         return hash_object.hexdigest()
@@ -552,8 +612,9 @@ class OMC:
         self.name = 'Omne Coin'
         self.symbol = 'OMC'
         self.decimals = 18
-        self.cge_base = 13300000
-        self.initial_supply = self.cge_base * (10 ** self.decimals)
+        self.soft_max = 2200000
+        self.coin_max = 22000000000000000000000000
+        self.initial_supply = self.soft_max * (10 ** self.decimals)
         self.balance = {}
         self.id = "0z3ffd5d95e8b870eb1812caf03833b9ea8eadaeb7"
         self.circulating_supply = 0.0
@@ -562,6 +623,8 @@ class OMC:
         self.total_burned = 0
         self.staked_coins = []
         self.balance_lock = threading.Lock()
+        self.reserves = 0
+        self.treasury_address = None
 
     def transfer(self, from_address, to_address, amount):
         with self.balance_lock:
@@ -625,7 +688,6 @@ class OMC:
         if address not in self.balance:
             self.balance[address] = 0
         self.balance[address] += amount
-        self.other_activity_history.append({"sender": None, "recipient": address, "amount": amount})
 
     def debit(self, address: str, amount: int):
         if address not in self.balance:
@@ -633,7 +695,6 @@ class OMC:
         if self.balance[address] < amount:
             raise ValueError("Insufficient balance for debit")
         self.balance[address] -= amount
-        self.other_activity_history.append({"sender": address, "recipient": None, "amount": amount})
 
     def mint_coins_and_send(self, to_address, amount):
         if amount <= 0:
@@ -651,27 +712,200 @@ class OMC:
 
             self.balance[to_address] += amount
             self.circulating_supply += amount
-            self.minting_history.append((to_address, amount))
-
+            self.total_minted += amount
+            
             return True
 
-    def burn_coins(self, amount):
-        burn_address = "0z0000000000000000000000000000000000000000"
+    def mint_for_block_fee(self, transaction_fee):
+        base_amount = 48
+        adjustment_factor = 0.08
+        base_fee = 26
+
+        # Calculate the number of years since initialization
+        current_date = datetime.now(timezone.utc)
+        years_since_init = (current_date - self.init_date).days // 365
+
+        # Calculate the number of halvings
+        num_halvings = years_since_init // 4
+
+        # Adjust the base amount according to the number of halvings
+        base_amount /= (2 ** num_halvings)
+
+        if transaction_fee > base_fee:
+            percent_increase = ((transaction_fee - base_fee) / base_fee) * 100
+            number_of_adjustments = percent_increase // 5
+            for _ in range(int(number_of_adjustments)):
+                base_amount *= (1 - adjustment_factor)
+
         with self.balance_lock:
-            if self.circulating_supply >= amount * (10 ** self.decimals):
-                self.circulating_supply -= amount * (10 ** self.decimals)
-                self.total_burned += amount * (10 ** self.decimals)
-                logging.info(f"Burned {amount} coins, transferred to burn address {burn_address}.")
-                return True
-            else:
-                logging.error("Insufficient circulating supply for burn")
-                return False
+            if self.circulating_supply >= self.coin_max:
+                raise ValueError("Peak supply has been reached. No more minting allowed.")
+
+            if self.treasury_address not in self.balance:
+                self.balance[self.treasury_address] = 0
+
+            self.balance[self.treasury_address] += base_amount
+            self.circulating_supply += base_amount
+            self.total_minted += base_amount
+            logging.info(f"Minted {base_amount} to treasury for block fee purposes.")
+
+        return base_amount
 
     @staticmethod
     def is_valid_address(address):
         if not re.match(r'^0b[0-9a-fA-F]{40}$', address):
             return False
         return True
+
+class pOMC:
+    def __init__(self, max_supply=0, name='Precursor OMC', symbol='pOMC', decimals=18):
+        self.name = name
+        self.symbol = symbol
+        self.decimals = decimals
+        self.id = "0z945e3cbb01dd784e96f0b53e18bef3af38c2f039"
+        self.max_supply = max_supply
+        self.whitelisted_addresses = set()
+        self.minted_addresses = set()
+        self.balance = {}
+        self.burn_address = "0z0000000000000000000000000000000000000000"
+        self.burned_pomc = 0  # Track the amount of pOMC burned
+        self.balance_lock = threading.Lock()
+        self.initial_mint_done = False  # Kill switch to prevent additional minting after initial mint
+
+    def mint(self, recipient, amount):
+        if self.initial_mint_done:
+            raise ValueError("Minting additional coins is not allowed after the initial mint")
+
+        if amount <= 0:
+            raise ValueError("Amount must be a positive value")
+
+        if recipient not in self.whitelisted_addresses:
+            raise ValueError("Recipient is not whitelisted")
+
+        if recipient in self.minted_addresses:
+            raise ValueError("Address has already received coins")
+
+        if recipient not in self.balance:
+            self.balance[recipient] = 0
+
+        self.balance[recipient] += amount
+        self.minted_addresses.add(recipient)
+        self.initial_mint_done = True
+
+    def whitelist_address(self, address, pub_key, signature):
+        if address in self.whitelisted_addresses:
+            raise ValueError("Address is already whitelisted")
+
+        self.whitelisted_addresses.add(address)
+        
+        transaction = {
+            'pub_key': pub_key,
+            'sender': address,
+            'signature': signature,
+            'sub_type': 'w',
+            'type': 'c',
+            'when': str(datetime.now(timezone.utc))
+        }
+        
+        transaction_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction, 'c')
+        
+        result = {
+            'fee': transaction_fee,
+            'hash': transaction_hash,
+            'pub_key': pub_key,
+            'sender': address,
+            'signature': signature,
+            'sub_type': 'w',
+            'type': 'c',
+            'when': str(datetime.now(timezone.utc))
+        }
+        
+        transactions.transactions.append(result)
+
+    def transfer(self, from_address, to_address, amount):
+        raise ValueError("Coin transfer between whitelisted addresses is prohibited")
+
+    def burn(self, address, amount):
+        if amount <= 0:
+            raise ValueError("Amount must be a positive value")
+
+        if address not in self.balance or self.balance[address] < amount:
+            raise ValueError("Insufficient balance for burning")
+
+        with self.balance_lock:
+            self.balance[address] -= amount
+            self.burned_pomc += amount
+            self.max_supply -= amount
+            if self.burn_address not in self.balance:
+                self.balance[self.burn_address] = 0
+            self.balance[self.burn_address] += amount
+
+    def get_balance(self, address):
+        return self.balance.get(address, 0)
+
+    def omc_redemption(self, address, amount):
+        if address not in self.whitelisted_addresses:
+            raise ValueError("Address is not whitelisted")
+
+        if address not in self.balance:
+            raise ValueError("Address does not have any pOMC balance")
+
+        if self.balance[address] < amount:
+            raise ValueError("Insufficient pOMC balance for redemption")
+
+        # Deduct pOMC from the address and send to the burn address
+        self.burn(address, amount)
+
+        # Transfer OMC from OMC instance to the address
+        coin.mint_coins_and_send(address, amount)
+
+    def __init__(self, coin):
+        self.coin = coin
+        self.lockup_period_months = 28
+        self.distribution_interval_months = 3
+        self.locked_balance = 0
+        self.lockup_end_time = None
+        self.kill_switch = False
+        self.lock = threading.Lock()
+
+    def initialize_lockup(self, amount, address1, address2):
+        with self.lock:
+            if self.kill_switch:
+                logging.error("The lockup method has already been executed once. Cannot run again.")
+                return False
+
+            # Mint coins to the Vault address
+            vault_address = "0xVaultAddress"  # Replace with the actual Vault address
+            if not self.coin.mint_coins(vault_address, amount):
+                logging.error("Failed to mint coins to the Vault address.")
+                return False
+
+            self.locked_balance = amount
+            self.lockup_end_time = datetime.now() + timedelta(days=self.lockup_period_months * 30)
+            self.kill_switch = True
+            logging.info(f"Successfully initialized lockup with {amount} coins for 28 months.")
+
+            # Start the distribution thread
+            distribution_thread = threading.Thread(target=self.distribute_coins_quarterly, args=(vault_address, address1, address2))
+            distribution_thread.daemon = True
+            distribution_thread.start()
+
+            return True
+
+    def distribute_coins_quarterly(self, vault_address, address1, address2):
+        quarters = self.lockup_period_months // self.distribution_interval_months
+        quarterly_distribution_amount = self.locked_balance / quarters / 2
+
+        for _ in range(quarters):
+            time.sleep(self.distribution_interval_months * 30 * 24 * 60 * 60)  # Sleep for 3 months
+            with self.lock:
+                if self.locked_balance > 0:
+                    if not self.coin.transfer(vault_address, address1, quarterly_distribution_amount):
+                        logging.error(f"Failed to transfer {quarterly_distribution_amount} to {address1}.")
+                    if not self.coin.transfer(vault_address, address2, quarterly_distribution_amount):
+                        logging.error(f"Failed to transfer {quarterly_distribution_amount} to {address2}.")
+                    self.locked_balance -= quarterly_distribution_amount * 2
+                    logging.info(f"Distributed {quarterly_distribution_amount} coins to {address1} and {address2}.")
 
 class AccMngr:
     def __init__(self):
@@ -747,10 +981,10 @@ class StakedOMC:
         self.id = None
         self.symbol = symbol
         self.decimals = decimals
-        self.id = "0b48d76b0690dcdcb32f1893d75c99681f2b595b36"
+        self.id = "0z48d76b0690dcdcb32f1893d75c99681f2b595b36"
         self.image = "https://bafybeihbanfylphrqzpzgaibz6pwwl7wyq7kp2n2yt2bq4irrrwirwgcga.ipfs.w3s.link/sOMC-3.png"
         self.balance = {}
-        self.burn_address = "0b0000000000000000000000000000000000000000"
+        self.burn_address = "0z0000000000000000000000000000000000000000"
         self.staked_omc_distributed = 0.0
         self.treasury_address = None
 
@@ -758,11 +992,13 @@ class StakedOMC:
         """
         Mint staked coins and send them to the specified recipient.
         """
+        logging.info(f"Minting staked coins: recipient={recipient}, amount={amount}")
         if amount <= 0:
             raise ValueError("Amount must be a positive value")
 
         # Convert the staked amount to a value with the correct number of decimal places
         amount_with_decimals = amount * (10 ** self.decimals)
+        logging.info(f"Amount with decimals: {amount_with_decimals}")
 
         if recipient not in self.balance:
             self.balance[recipient] = 0
@@ -779,6 +1015,8 @@ class StakedOMC:
             # Create a new account object and add it to the accounts list
             new_account = {'address': recipient, 'balance': amount_with_decimals}
             self.accounts.append(new_account)
+
+        logging.info(f"Minted {amount_with_decimals} staked coins to {recipient}. Total distributed: {self.staked_omc_distributed}")
 
     def transfer(self, from_address, to_address, amount):
         """
@@ -819,7 +1057,8 @@ class StakingMngr:
 
     def stake_coins(self, node_address, address, amount, min_term, pub_key):
         # Check if the address has enough balance for the proposed staking operation
-        logging.info(f"Stake on node: {node_address}")
+        logging.info(f"Stake on node: {node_address}, address: {address}, amount: {amount}, min_term: {min_term}, pub_key: {pub_key}")
+        
         try:
             if not self.check_balance_for_staking(address, amount):
                 raise ValueError("Insufficient balance for staking")
@@ -828,6 +1067,7 @@ class StakingMngr:
 
         # Generate a unique hexadecimal contract ID for the staking agreement
         contract_id = '0s' + str(secrets.token_hex(16))
+        logging.info(f"Generated contract ID: {contract_id}")
 
         # Debit the wallet for the staked amount
         try:
@@ -849,45 +1089,20 @@ class StakingMngr:
 
         # Add the staked amount to the total_staked attribute in OMC
         coin.total_staked += amount
+        logging.info(f"Total staked amount updated: {coin.total_staked}")
 
         # Mint StakedOMC and send them to the wallet
-        staked_coin.mint(address, amount)
+        try:
+            staked_coin.mint(address, amount)
+        except ValueError as e:
+            raise ValueError(f"Failed to mint staked coins: {e}")
 
         # Add staking details to the wallet's staking agreements
         self.staking_agreements.append(staking_contract)
-
         logging.warning(f"Staked {amount} OMC for {min_term} days successfully. Contract ID: {contract_id}")
 
         # Return the staking contract to the caller
         return staking_contract
-
-    def unstake_coins(self, staking_address, contract_id):
-        current_time = time.time()
-
-        for agreement in self.staking_agreements.copy():
-            staking_address_agreement = agreement['address']
-            staking_amount = agreement['amount']
-            min_term = agreement['min_term']
-            agreement_contract_id = agreement['contract_id']
-
-            if current_time >= agreement['staking_end_time'] and staking_address_agreement == staking_address and agreement_contract_id == contract_id:
-                # Remove the staking agreement from the list
-                self.staking_agreements.remove(agreement)
-
-                # Update the OMC staked_coins and total_staked
-                for staked_coin in coin.staked_coins.copy():
-                    if staked_coin['address'] == staking_address_agreement and staked_coin['amount'] == staking_amount and staked_coin['contract_id'] == contract_id:
-                        coin.staked_coins.remove(staked_coin)
-                        coin.total_staked -= staking_amount
-
-                # Mint and send the unstaked OMC back to the wallet
-                staked_omc_balance = staked_coin.get_balance(staking_address_agreement)
-                staked_coin.burn(staking_address_agreement, staked_omc_balance)
-
-                # Credit the wallet with the unstaked OMC
-                account_manager.credit_account(staking_address_agreement, staked_omc_balance, staking_address_agreement, 'unstake')
-
-                logging.warning(f"Unstaked {staked_omc_balance} OMC for {min_term} days from {staking_address_agreement}. Contract ID: {contract_id}")
 
     def check_balance_for_staking(self, address: str, amount: Union[int, float]) -> bool:
         """
@@ -901,6 +1116,7 @@ class StakingMngr:
             bool: True if the balance is sufficient, False otherwise.
         """
         account_balance = coin.get_balance(address)
+        logging.info(f"Checking balance for staking: address={address}, balance={account_balance}, amount={amount}")
         return account_balance >= amount
 
 class Wallet:
@@ -919,8 +1135,12 @@ class Wallet:
         return -1
 
     @staticmethod
-    def generate_key_from_passphrase(self, private_key, password):
+    def generate_key_from_passphrase(self, private_key):
         try:
+            with open("pk.json") as file:
+                data = json.load(file)
+            password = data["pw"]
+
             passphrase_bytes = password.encode('utf-8')  # Encode the passphrase to bytes
             salt = os.urandom(16)  # Generate a random salt
             key = hashlib.pbkdf2_hmac(
@@ -1031,6 +1251,10 @@ class OMCTreasury:
     def __init__(self):
         self.treasury_account = None
         self.balance = 0.0
+        self.dao = None
+
+    def set_dao(self, dao):
+        self.dao = dao
 
     def get_treasury_balance(self):
         if self.treasury_account is None:
@@ -1062,21 +1286,16 @@ class OMCTreasury:
             self.balance = treasury_data['balance']
 
 class Node:
-    def __init__(self, current_node_url="http://current-node-url:3400", address=None, stake_weight=0,
+    def __init__(self, address=None, stake_weight=0, url="http://node.omne:3400",
                  version="0.0.1", private_key=None, public_key=None, signature=None, steward=None):
         self.address = address
         self.stake_weight = stake_weight
+        self.url = url
         self.version = version
         self.private_key = private_key
         self.public_key = public_key
         self.signature = signature
         self.steward = steward
-        self.current_node_url = current_node_url
-        
-        # Discover existing services and set the URL dynamically
-        discovered_services = self.discover_services("node")
-        node_num = len(discovered_services) + 1
-        self.url = f"http://node{node_num}.omne:3400"
 
         # If address and keys are not provided, generate new ones
         if not self.address or not self.private_key or not self.public_key:
@@ -1085,6 +1304,8 @@ class Node:
 
             # Extract key data
             self.address = account['address']
+            # Assuming private_key is also a byte-like object that needs conversion
+            # Adjust this line if private_key is already correctly formatted
             self.private_key = binascii.hexlify(account['private_key']).decode('utf-8')
             self.public_key = account['pub_key']
 
@@ -1128,26 +1349,8 @@ class Node:
             'steward': self.steward
         }
 
-    def discover_services(self, prefix):
-        discovered_services = []
-        max_range = 10
-
-        for i in range(1, max_range):
-            service_name = f"{prefix}{i}.omne"
-            try:
-                service_address = socket.gethostbyname(service_name)
-                if service_address != self.current_node_url:
-                    discovered_services.append(service_name)
-                    logging.debug(f"Discovered service: {service_name}")
-            except socket.gaierror:
-                continue
-
-        if not discovered_services:
-            logging.warning("No services were discovered.")
-        return discovered_services
-
 class Block:
-    def __init__(self, index: int, fee: int, previous_hash: str, timestamp: str, transactions: list, validator: str, validator_fee: int):
+    def __init__(self, index: int, fee: int, previous_hash: str, timestamp: str, transactions: list, validator: str, validator_share: int):
         self.index = index
         self.previous_hash = previous_hash
         self.timestamp = timestamp
@@ -1156,7 +1359,7 @@ class Block:
         self.fee = fee
         self.hash = self.calculate_hash()
         self.validator = validator
-        self.validator_fee = validator_fee
+        self.validator_share = validator_share
 
     def calculate_hash(self) -> str:
         """
@@ -1197,24 +1400,29 @@ class Block:
             # Increment the nonce and try again
             self.nonce += 1
 
-class DoubleSpendingError(Exception):
+
     def __init__(self, message="Double spending detected"):
         self.message = message
         super().__init__(self.message)
 
-class Ledger:
-    def __init__(self, coin, node, wallet, transactions, treasury, verifier):
+
+    def __init__(self, coin, node, wallet, transactions, verifier):
         self.coin = coin
         self.node = node
         self.wallet = wallet
         self.transactions = transactions
-        self.treasury = treasury
         self.verifier = verifier
 
         self.chain = []
         self.block_hashes = set()
         self.lock = threading.Lock()
         logging.basicConfig(level=logging.DEBUG)
+        
+        self.validators = []
+        
+        mining_thread = threading.Thread(target=self.mine_new_block_periodically)
+        mining_thread.daemon = True
+        mining_thread.start()
 
     @staticmethod
     def serialize_and_create_single_hash(cls):
@@ -1255,11 +1463,14 @@ class Ledger:
 
         classes_to_verify = {
             'coin': OMC,
+            'quantum_utils': QuantumUtils,
+            'transactions': Transactions,
+            'permission_manager': PermissionMngr,
+            'precursor_coin': pOMC,
             'verifier': Verifier,
             'crypto_utils': CUtils,
             'fee_calculator': DynamicFeeCalculator,
-            'ledger': Ledger,
-            'consensus': SWRVS
+            'ledger': Ledger
         }
 
         for class_name, cls in classes_to_verify.items():
@@ -1290,10 +1501,6 @@ class Ledger:
         self.check_chain_length_and_sync(services)
         self.update_validators()
         self.broadcast_node_data(self.node)
-
-        mining_thread = threading.Thread(target=self.mine_new_block_periodically)
-        mining_thread.daemon = True
-        mining_thread.start()
 
     def discover_services(self, prefix):
         discovered_services = []
@@ -1334,10 +1541,10 @@ class Ledger:
                     logging.debug(f"Successfully pinged {service_url}")
                     received_nodes = response.json().get('nodes', [])
                     for received_node in received_nodes:
-                        if not any(node['address'] == received_node['address'] for node in self.node.nodes):
-                            self.node.nodes.append(received_node)
-                            self.node.verifier.verified_nodes.append(received_node)
-                            self.node.validators.append(received_node['address'])
+                        if not any(node['address'] == received_node['address'] for node in self.verifier.nodes):
+                            verifier.nodes.append(received_node)
+                            verifier.nodes.append(received_node)
+                            self.validators.append(received_node['address'])
                             logging.debug(f"Added new node: {received_node['address']}")
                 else:
                     logging.debug(f"Failed to ping {service_url}, status code: {response.status_code}")
@@ -1401,8 +1608,8 @@ class Ledger:
                 response = requests.get(service_url)
                 if response.status_code == 200:
                     node_data = response.json()
-                    if node_data['address'] not in self.node.validators:
-                        self.node.validators.append(node_data['address'])
+                    if node_data['address'] not in self.validators:
+                        self.validators.append(node_data['address'])
             except requests.exceptions.RequestException as e:
                 logging.error(f"Failed to retrieve node information from {service}: {e}")
 
@@ -1477,10 +1684,10 @@ class Ledger:
         self.post_data_to_services(filtered_services, "propagate_account", new_account)
 
     def update_node_state(self, new_node):
-        if new_node not in self.node.nodes:
-            self.node.nodes.append(new_node)
+        if new_node not in self.verifier.nodes:
+            verifier.nodes.append(new_node)
             self.node.verifier.verified_nodes.append(new_node)
-            self.node.validators.append(new_node.address)
+            self.validators.append(new_node.address)
             logging.info(f"Node {new_node.address} added to local state.")
 
     def mine_new_block_periodically(self, interval=9):
@@ -1499,11 +1706,17 @@ class Ledger:
         latest_block = self.chain[-1]
         block_timestamp = datetime.strptime(latest_block['timestamp'], "%Y-%m-%d %H:%M:%S.%f%z")
         current_timestamp = datetime.now(timezone.utc)
-        return (current_timestamp - block_timestamp).total_seconds() >= 8 * 60
+        
+        mining_interval = 9 * 60  # Fixed interval of 9 minutes
+        return (current_timestamp - block_timestamp).total_seconds() >= mining_interval
 
     def create_new_wallet(self):
         mnemonic = crypto_utils.generate_mnemonic()
         account = self.wallet.account_manager.generate_account_from_mnemonic(mnemonic)
+        
+        # Add the new address with a balance of zero to the self.balance dictionary
+        with coin.balance_lock:
+            coin.balance[account['address']] = 0.0
 
         wallet_creation_transaction = {
             'address': account['address'],
@@ -1527,7 +1740,6 @@ class Ledger:
             'address': wallet_creation_transaction['address'],
             'balance': initial_balance,
         }
-        account_manager.accounts.append(account_dict)
 
         sendable_transaction = {
             'mnemonic': mnemonic,
@@ -1651,9 +1863,9 @@ class Ledger:
                             staked_coin.balance[new_acc['address']] = new_acc['amount']
                             logging.info(f"Added new staking account {new_acc['address']} for {staked_coin.name}.")
 
-                self.node.validators = data.get('validators', [])
-                if self.node.address not in self.node.validators:
-                    self.node.validators.append(self.node.address)
+                self.validators = data.get('validators', [])
+                if self.node.address not in self.validators:
+                    self.validators.append(self.node.address)
 
                 notification_data = {"message": "Data updated from authoritative node"}
                 self.post_data_to_services(self.discover_services("node"), "notify_data_update", notification_data)
@@ -1722,7 +1934,7 @@ class Ledger:
             if block['hash'] != calculated_hash:
                 return False
 
-            if not self.node.validate_stake(block):
+            if not self.validate_stake(block):
                 return False
 
             previous_block = block
@@ -1745,6 +1957,157 @@ class Ledger:
         else:
             logging.warning(f"Block with index {block['index']} failed validation.")
         return False
+    
+    def broadcast_block(self, new_block):
+        block_data = json.dumps(new_block)
+
+        service_prefix = "node"
+        services = self.discover_services(service_prefix)
+
+        self.post_data_to_services(services, "blocks/receive_block", block_data)
+        
+    def validate_foreign_tx(self, address, hash, pub_key, tx, signature):
+        logging.debug(f"Validating tx from {address}")
+
+        tx_hash = quantum_utils.quantum_resistant_hash(json.dumps(tx, sort_keys=True))
+        if tx_hash != hash:
+            logging.error(f"Hash mismatch for transaction with hash: {hash}")
+            return None
+
+        if not CUtils.verify_transaction(pub_key, tx, signature):
+            logging.error(f"Invalid signature in foreign transaction with hash: {hash} from address: {address}")
+            return None
+
+        return True
+
+    def vote_on_local_tx(self, address, hash, pub_key, tx, signature):
+        valid_votes = []
+        services = ledger.discover_services("node")
+
+        if len(services) == 1 and services[0] == self.node.url:
+            logging.info("Only one validator in the network, bypassing the voting process.")
+            valid_votes.append(self.node.url)
+
+        filtered_services = [s for s in services if f"http://{s}:3400" != self.node.url]
+        for service in filtered_services:
+            service_url = f"http://{service}:3400/vote_on_tx"
+
+            try:
+                data = {
+                    'address': address,
+                    'hash': hash,
+                    'pub_key': pub_key,
+                    'new_tx': tx,
+                    'signature': signature
+                }
+                response = requests.post(service_url, json=data)
+                if response.status_code == 200 and response.json().get('message') == 'Tx is valid':
+                    valid_votes.append(service)
+                    logging.info(f"Validator {service} approved the tx.")
+                else:
+                    logging.info(f"Validator {service} did not approve the tx.")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error voting on block with {service}: {e}")
+
+        return valid_votes
+
+    def reach_tx_consensus(self, address, hash, pub_key, tx, signature):
+        if len(self.validators) == 1:
+            logging.info("Automatically reaching consensus with single validator")
+            return True
+
+        consensus_reached = self.vote_on_local_tx(address, hash, pub_key, tx, signature)
+
+        if consensus_reached:
+            logging.info("Tx consensus reached")
+            return True
+        else:
+            logging.info("Tx consensus not reached")
+            return False
+
+    def receive_tx(self, address, hash, pub_key, tx, signature):
+        try:
+            if not self.validate_foreign_tx(address, hash, pub_key, tx, signature):
+                logging.error(f"Received transaction, with hash {hash} from wallet {address}, did not pass verification")
+                return False
+
+            return True
+        except Exception as e:
+            logging.error(f"Error processing received transaction: {str(e)}")
+            return False
+
+    def receive_block(self, block):
+        try:
+            services = ledger.discover_services("node")
+            authoritative_node_url, _ = ledger.sync_with_other_nodes(services)
+
+            if authoritative_node_url:
+                ledger.sync_account_list_data(authoritative_node_url, account_manager, coin, staked_coin)
+                ledger.sync_treasury_data(authoritative_node_url)
+
+            return True
+        except Exception as e:
+            logging.error(f"Error processing received block: {str(e)}")
+            return False
+
+    def broadcast_tx(self, address, hash, pub_key, new_tx, signature):
+        data = {
+            'address': address,
+            'hash': hash,
+            'pub_key': pub_key,
+            'new_tx': new_tx,
+            'signature': signature
+        }
+
+        services = ledger.discover_services("node")
+
+        ledger.post_data_to_services(services, "transaction/receive_tx", data)
+
+        return True
+    
+    def randomly_select_validator(self):
+        if not self.validators:
+            logging.warning("No validators available.")
+            return None
+
+        try:
+            if len(self.validators) == 1:
+                validator_address = self.validators[0]
+                logging.info(f"Only one validator available. Selected validator address: {validator_address}")
+                return validator_address
+
+            max_value = len(self.validators) - 1
+            random_bytes = QuantumUtils.quantum_random_bytes((max_value.bit_length() + 7) // 8)
+            random_int = int.from_bytes(random_bytes, 'big') % (max_value + 1)
+            validator_address = self.validators[random_int]
+            logging.info(f"Randomly selected validator address: {validator_address}")
+            return validator_address
+        except Exception as e:
+            logging.error(f"Error generating random index: {e}")
+            return None
+
+    def trigger_sync_on_all_nodes(self):
+        services = ledger.discover_services("node")
+
+        data = {}
+
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+
+            if service_base_url == self.node.url:
+                logging.debug(f"Skipping self sync trigger: {service_base_url}")
+                continue
+
+            service_url = f"{service_base_url}/trigger_sync"
+            logging.debug(f"Attempting to trigger sync on {service_url}")
+            try:
+                response = requests.post(service_url, json=data)
+                if response.status_code == 200:
+                    logging.debug(f"Successfully triggered sync on {service_url}")
+                else:
+                    logging.debug(f"Failed to trigger sync on {service_url}, status code: {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error triggering sync on {service_url}: {e}")
 
     def validate_received_block(self, block):
         logging.debug(f"Validating received block with index {block['index']}")
@@ -1797,14 +2160,52 @@ class Ledger:
 
         logging.debug("Block structure validated successfully.")
         return True
+    
+    def reach_consensus(self, proposed_block):
+        if len(self.validators) == 1:
+            logging.info("Automatically reaching consensus with single validator")
+            return True
+
+        consensus_reached = self.vote_on_local_block(proposed_block)
+
+        if consensus_reached:
+            logging.info("Consensus reached")
+            return True
+        else:
+            logging.info("Consensus not reached")
+            return False
+
+    def vote_on_local_block(self, block):
+        valid_votes = []
+        services = self.discover_services("node")
+
+        if len(services) == 1 and services[0] == self.node.url:
+            logging.info("Only one validator in the network, bypassing the voting process.")
+            valid_votes.append(self.node.url)
+
+        filtered_services = [s for s in services if f"http://{s}:3400" != self.node.url]
+        for service in filtered_services:
+            service_url = f"http://{service}:3400/vote_on_block"
+
+            try:
+                response = requests.post(service_url, json=block)
+                if response.status_code == 200 and response.json().get('message') == 'Block is valid':
+                    valid_votes.append(service)
+                    logging.info(f"Validator {service} approved the block.")
+                else:
+                    logging.info(f"Validator {service} did not approve the block.")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error voting on block with {service}: {e}")
+
+        return valid_votes
 
     def validate_block(self, block):
         logging.debug(f"Validating block with index {block['index']}")
-        if block['validator'] not in self.node.validators:
+        if block['validator'] not in self.validators:
             logging.error("Block validator is not recognized.")
             return False
 
-        if not self.node.proof_of_stake(block):
+        if not self.proof_of_stake(block):
             return False
 
         unique_addresses = set()
@@ -1827,7 +2228,7 @@ class Ledger:
             logging.error("Block hash does not match the generated hash.")
             return False
 
-        if not self.node.reach_consensus(block):
+        if not self.reach_consensus(block):
             logging.error("Failed to reach consensus.")
             return False
 
@@ -1836,11 +2237,11 @@ class Ledger:
 
     def validate_foreign_block(self, block):
         logging.debug(f"Validating block with index {block['index']}")
-        if block['validator'] not in self.node.validators:
+        if block['validator'] not in self.validators:
             logging.error("Block validator is not recognized.")
             return False
 
-        if not self.node.proof_of_stake(block):
+        if not self.proof_of_stake(block):
             return False
 
         unique_addresses = set()
@@ -1882,6 +2283,35 @@ class Ledger:
 
         block_hash = hashlib.sha256(block_contents.encode()).hexdigest()
         return block_hash
+    
+    def proof_of_stake(self, block):
+        logging.info("Starting proof of stake validation.")
+
+        total_stake_weight = sum(node['stake_weight'] if isinstance(node, dict) else node.stake_weight for node in self.verifier.nodes)
+        random_number = random.uniform(0, total_stake_weight)
+        cumulative_stake_weight = 0
+
+        logging.info(f"Total stake weight: {total_stake_weight}, Random number for validator selection: {random_number}")
+
+        for current_node in self.verifier.nodes:
+            node_stake_weight = current_node['stake_weight'] if isinstance(current_node, dict) else current_node.stake_weight
+            cumulative_stake_weight += node_stake_weight
+
+            if cumulative_stake_weight > random_number:
+                selected_validator_address = current_node['address'] if isinstance(current_node, dict) else current_node.address
+                logging.info(f"Selected validator address: {selected_validator_address}, Stake weight: {node_stake_weight}")
+
+                if selected_validator_address == block['validator']:
+                    logging.info(f"Validator {selected_validator_address} matches the block's validator.")
+                    if node_stake_weight >= block['stake_threshold']:
+                        logging.info(f"Validator {selected_validator_address} meets the stake threshold.")
+                        return node_stake_weight
+                    else:
+                        logging.error(f"Validator {selected_validator_address} does not meet the stake threshold.")
+                        return 0
+
+        logging.error("No suitable validator found or the selected validator does not meet the stake threshold.")
+        return 0
 
     def add_coin_transaction(self, address: str, amount: int, converted_amount: Union[int, float], fee: Union[int, float], hash: str, pub_key: str, signature: str, sub_type: str, type: str) -> Union[bool, str]:
 
@@ -1899,21 +2329,69 @@ class Ledger:
 
         if cleaned_transaction['signature']:
             return cleaned_transaction
+        
+    def select_miner(self) -> dict:
+        accounts = staking_manager.staking_agreements
+
+        # If no accounts are available, return None
+        if not accounts:
+            logging.warning("No staking accounts available for miner selection.")
+            return None
+
+        # Calculate the number of withdrawals for each account
+        for account in accounts:
+            account['withdrawals'] = sum(1 for block in self.chain for transaction in block['transactions']
+                                        if 'address' in transaction and transaction.get('address') == account['address'])
+
+        # Select the miner based on weighted selection
+        miner = self.weighted_selection(accounts)
+        return miner
+
+    def weighted_selection(self, accounts: List[dict]) -> dict:
+        # Calculate weights based on the number of withdrawals for each account
+        weights = [1 / (acc['withdrawals'] + 1) for acc in accounts]
+        total_weight = sum(weights)
+
+        # Normalize the weights to ensure their sum is 1
+        normalized_weights = [weight / total_weight for weight in weights]
+
+        # Select an account using the normalized weights
+        chosen_account = random.choices(
+            accounts, weights=normalized_weights, k=1)[0]
+        return chosen_account
 
     def calculate_fee_distribution(self, total_fee):
         fee_distribution = {}
 
         validator_percentage = 0.45
         miner_percentage = 0.315
-        treasury_percentage = 0.165
-        burn_percentage = 0.07
+        treasury_percentage = 0.235  # Updated to include the burn percentage
 
         fee_distribution['validator_share'] = total_fee * validator_percentage
         fee_distribution['miner_share'] = total_fee * miner_percentage
         fee_distribution['treasury_share'] = total_fee * treasury_percentage
-        fee_distribution['burn_share'] = total_fee * burn_percentage
 
         return fee_distribution
+    
+    def select_validator(self, block):
+        selected_validator = self.verifier.select_validator(block)
+        return selected_validator if selected_validator else None
+
+    def validate_selected_validator(self, selected_validator, block):
+        if selected_validator.malicious or selected_validator not in verifier.verified_nodes:
+            return False
+
+        if selected_validator.address == block['validator'] and \
+                selected_validator.stake_weight >= block['stake_threshold']:
+            return True
+
+        return False
+
+    def add_malicious_validator(self, validator_address):
+        for node in self.nodes:
+            if node.address == validator_address:
+                node.malicious = True
+                break
 
     def create_new_block(self, transactions):
         latest_block = self.chain[-1]
@@ -1923,12 +2401,14 @@ class Ledger:
         stake_threshold = self.node.stake_weight
 
         processed_transactions, total_fee = self.process_transactions(transactions)
-
-        block_fee = coin.mint_for_block_fee(165.925925926, total_fee)
-
+        block_fee = self.coin.mint_for_block_fee(total_fee)
         fee_distribution = self.calculate_fee_distribution(block_fee)
-
         miner = self.select_miner()
+
+        if miner is None:
+            logging.error("Failed to select a miner. Aborting block creation.")
+            return
+
         miner_address = miner['address']
 
         block = {
@@ -1941,12 +2421,7 @@ class Ledger:
         }
 
         validator_node = self.select_validator(block)
-
-        if not validator_node:
-            logging.warning("No validator selected, assigning default validator.")
-            validator_address = self.node.address
-        else:
-            validator_address = validator_node.address if isinstance(validator_node, Node) else validator_node['address']
+        validator_address = validator_node.address if validator_node else self.node.address
 
         for transaction in transactions:
             merkle_tree.add_transaction(str(transaction))
@@ -1954,18 +2429,9 @@ class Ledger:
         merkle_tree.create_tree()
         merkle_root = merkle_tree.get_merkle_root()
 
-        validator_reward = coin.check_and_reward_validator(validator_address)
-        coin.credit(validator_address, fee_distribution['validator_share'])
-
-        miner_reward = coin.check_and_reward_miner(miner_address)
-        coin.credit(miner_address, fee_distribution['miner_share'])
-
-        coin.credit(self.treasury_account, fee_distribution['treasury_share'])
-
-        burn_amount = fee_distribution['burn_share']
-        burn_success = coin.burn_coins(burn_amount)
-        if not burn_success:
-            logging.error(f"Failed to burn {burn_amount} coins.")
+        self.coin.credit(validator_address, fee_distribution['validator_share'])
+        self.coin.credit(miner_address, fee_distribution['miner_share'])
+        self.coin.credit(self.coin.treasury_address, fee_distribution['treasury_share'])
 
         new_block = {
             'index': block_index,
@@ -1979,8 +2445,7 @@ class Ledger:
             'miner_share': fee_distribution['miner_share'],
             'validator': validator_address,
             'validator_share': fee_distribution['validator_share'],
-            'treasury_share': fee_distribution['treasury_share'],
-            'burn_share': burn_amount
+            'treasury_share': fee_distribution['treasury_share']
         }
 
         logging.info(f"constructed block: {new_block}")
@@ -1988,6 +2453,7 @@ class Ledger:
         block_string = str(new_block['index']) + str(new_block['timestamp']) + str(new_block['previous_hash']) + str(
             new_block['transactions']) + str(new_block['fee']) + str(new_block['validator']) + str(new_block['validator_share'])
 
+        # Generate block hash
         block_hash = hashlib.sha256(block_string.encode()).hexdigest()
 
         new_block['hash'] = block_hash
@@ -2012,6 +2478,8 @@ class Ledger:
                 processed_transaction = self.handle_unstaking_transaction(transaction)
             elif transaction_type == 'k':
                 processed_transaction = self.handle_transfer_transaction(transaction)
+            elif transaction_type == 'w':
+                processed_transaction = self.handle_pomc_whitelist_transaction(transaction)
             elif transaction_type in ['h', 'x', 'm', 'pr']:
                 processed_transaction = self.handle_fee_payment_transaction(transaction)
             else:
@@ -2204,6 +2672,30 @@ class Ledger:
         except Exception as e:
             logging.error(f"Error processing transfer transaction: {e}")
             return None
+    
+    def handle_pomc_whitelist_transaction(self, transaction):
+        try:
+            
+            sender_address = transaction['sender']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            processed_transaction = {
+                'fee': transaction['fee'],
+                'hash': transaction['hash'],
+                'sender': transaction['sender'],
+                'sub_type': transaction['sub_type'],
+                'stake_threshold': 2,
+                'type': transaction['type'],
+                'when': transaction['when']
+            }
+
+            logging.info(f"Processed transfer transaction from {sender_address} to join pOMC whitelist")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing transfer transaction: {e}")
+            return None
 
     def handle_fee_payment_transaction(self, transaction):
         try:
@@ -2295,21 +2787,114 @@ class Ledger:
 
         for transaction in new_transactions:
             try:
-                if transaction['sub_type'] == 'c':
-                    self.process_patient_account_creation_transaction(transaction)
-
-                elif transaction['sub_type'] == 'd':
-                    self.process_physician_account_creation_transaction(transaction)
-
+                if transaction['type'] == 'c' and transaction['sub_type'] == 'c':
+                    self.process_account_creation_transaction(transaction)
+                elif transaction['type'] == 'c' and transaction['sub_type'] == 'w':
+                    self.process_add_account_to_whitelist_transaction(transaction)
                 elif transaction['type'] == 'o':
                     self.process_non_f_transaction(transaction)
-
                 elif transaction['type'] == 'e':
                     self.process_f_transaction(transaction)
             except Exception as e:
                 logging.error(f"Error processing transaction {transaction['type']}: {e}")
 
         return cleaned_transactions
+    
+    def process_account_creation_transaction(self, transaction):
+        # Verify that the transaction is of the correct type
+        if transaction['type'] != 'c':
+            logging.error(f"Invalid transaction type for account creation: {transaction['type']}")
+            return
+
+        try:
+            # Extract necessary fields from the transaction
+            address = transaction['address']
+            balance = transaction['balance']
+            type = transaction['type']
+            timestamp = ['timestamp']
+            withdrawals = transaction['withdrawals']
+
+            # Validate the transaction data
+            if not all([address, type]):
+                logging.error("Incomplete account creation transaction data")
+                return
+
+            # Check if the address already exists in the blockchain wallet
+            # if any(acc['address'] == address for acc in account_manager.accounts):
+            #     logging.info(f"Account already exists: {address}")
+            #     return
+
+            # # Create and append the new account to the wallet
+            # new_account = {
+            #     'address': address,
+            #     'balance': balance,
+            #     'withdrawals': withdrawals
+            # }
+            # account_manager.accounts.append(new_account)
+
+            # Create a cleaned version of the transaction for the blockchain
+            cleaned_transaction = {
+                'address': address,
+                'hash': transaction.get('hash'),
+                'pub_key': transaction['pub_key'],
+                'signature': transaction['signature'],
+                'sub_type': 'c',
+                'type': transaction['type'],
+                'withdrawals': withdrawals
+            }
+
+            # Append the cleaned transaction to the list of processed transactions
+            self.transactions.cleaned_transactions.append(cleaned_transaction)
+            logging.info(f"Processed account creation transaction for {address}")
+
+        except Exception as e:
+            logging.error(f"Error processing account creation transaction A2: {e}")
+            
+    def process_add_account_to_whitelist_transaction(self, transaction):
+        # Verify that the transaction is of the correct type
+        if transaction['type'] != 'c':
+            logging.error(f"Invalid transaction type to add account to whitelist: {transaction['type']}")
+            return
+
+        try:
+            result = {
+                'fee': transaction['fee'],
+                'hash': transaction['hash'],
+                'pub_key': transaction['pub_key'],
+                'sender': transaction['sender'],
+                'signature': transaction['signature'],
+                'sub_type': transaction['sub_type'],
+                'type': transaction['type'],
+                'when': transaction['when']
+            }
+            # Extract necessary fields from the transaction
+            address = transaction['sender']
+            hash = transaction['hash']
+            type = transaction['type']
+
+            # Validate the transaction data
+            if not all([address, hash, type]):
+                logging.error("Incomplete account creation transaction data")
+                return
+
+            # Create a cleaned version of the transaction for the blockchain
+            cleaned_transaction = {
+                'fee': transaction['fee'],
+                'hash': transaction['hash'],
+                'pub_key': transaction['pub_key'],
+                'sender': transaction['sender'],
+                'signature': transaction['signature'],
+                'sub_type': transaction['sub_type'],
+                'type': transaction['type'],
+                'when': transaction['when']
+            }
+
+            # Append the cleaned transaction to the list of processed transactions
+            self.transactions.cleaned_transactions.append(cleaned_transaction)
+            logging.info(f"Processed join whitelist transaction for {address}")
+
+        except Exception as e:
+            logging.error(f"Error processing join whiteist transaction A2: {e}")
 
     def process_f_transaction(self, transaction):
         try:
@@ -2414,7 +2999,7 @@ class Ledger:
         self.create_new_block(self.transactions.cleaned_transactions)
 
     def check_pending_transactions(self):
-        cleaned_transactions = self.clean_and_verify_transactions()
+        self.clean_and_verify_transactions()
         self.start_mining()
 
     def get_latest_block(self):
@@ -2431,121 +3016,561 @@ class Ledger:
             block = json.loads(block_data)
             self.receive_block(block)
 
-class SWRVS:
-    def __init__(self, node, verifier):
+    def __init__(self, coin, node, wallet, transactions, verifier):
+        self.coin = coin
         self.node = node
+        self.wallet = wallet
+        self.transactions = transactions
         self.verifier = verifier
+
+        self.chain = []
+        self.block_hashes = set()
+        self.lock = threading.Lock()
+        logging.basicConfig(level=logging.DEBUG)
+        
         self.validators = []
+        
+        mining_thread = threading.Thread(target=self.mine_new_block_periodically)
+        mining_thread.daemon = True
+        mining_thread.start()
 
-    def randomly_select_validator(self):
-        if not self.validators:
-            logging.warning("No validators available.")
-            return None
+    @staticmethod
+    def serialize_and_create_single_hash(cls):
+        if not isinstance(cls, type):
+            raise TypeError(f"Expected class type, got {type(cls)}")
 
-        validator_address = random.choice(self.validators)
-        logging.info(f"Randomly selected validator address: {validator_address}")
-        return validator_address
+        try:
+            class_dict = {
+                'attributes': {key: value for key, value in cls.__dict__.items() if not callable(value) and not key.startswith('__')},
+                'methods': {
+                    key: (value.__func__.__code__.co_code if isinstance(value, staticmethod) else value.__code__.co_code)
+                    for key, value in cls.__dict__.items() if callable(value)
+                }
+            }
+            class_serialized = json.dumps(class_dict, sort_keys=True, default=str)
+            logging.debug(f"Serialized class {cls.__name__}: {class_serialized}")
+            class_hash = hashlib.sha256(class_serialized.encode()).hexdigest()
+            return class_hash
+        except Exception as e:
+            logging.error(f"Error serializing class {cls.__name__}: {e}")
+            raise
 
-    def trigger_sync_on_all_nodes(self):
-        services = self.node.ledger.discover_services("node")
+    @staticmethod
+    def verify_class_hashes():
+        """
+        This function retrieves the stored hashes of classes from the public API and compares them
+        with the hashes of the current local classes to ensure integrity.
+        """
+        try:
+            response = requests.get(HASH_API_URL)
+            if response.status_code != 200:
+                raise ValueError("Failed to fetch class hashes from public API.")
 
-        data = {}
+            stored_hashes = response.json()
+        except Exception as e:
+            logging.error(f"Error fetching class hashes from public API: {e}")
+            raise
+
+        classes_to_verify = {
+            'coin': OMC,
+            'precursor_coin': pOMC,
+            'verifier': Verifier,
+            'crypto_utils': CUtils,
+            'fee_calculator': DynamicFeeCalculator,
+            'ledger': Ledger
+        }
+
+        for class_name, cls in classes_to_verify.items():
+            stored_hash = stored_hashes.get(class_name)
+            if not stored_hash:
+                logging.error(f"Stored hash for class {class_name} not found in the public API response.")
+                raise ValueError(f"Stored hash for class {class_name} not found.")
+
+            local_hash = Ledger.serialize_and_create_single_hash(cls)
+            if stored_hash != local_hash:
+                logging.error(f"Hash mismatch for class {class_name}. Possible tampering detected.")
+                raise ValueError(f"Hash mismatch for class {class_name}. Possible tampering detected.")
+
+        logging.info("All class hashes verified successfully. No tampering detected.")
+        return True
+
+    def initialize_node(self):
+        service_prefix = "node"
+        services = self.discover_services(service_prefix)
+        if services:
+            self.ping_services(services, "check_nodes", self.node.url)
+
+        self.node.steward = os.getenv('STEWARD_ADDRESS')
+        if not self.node.steward:
+            raise ValueError("Steward address not provided. Set the STEWARD_ADDRESS environment variable.")
+
+        self.update_node_state(self.node)
+        self.check_chain_length_and_sync(services)
+        self.update_validators()
+        self.broadcast_node_data(self.node)
+
+    def discover_services(self, prefix):
+        discovered_services = []
+        max_range = 10
+
+        for i in range(1, max_range):
+            service_name = f"{prefix}{i}.omne"
+            try:
+                service_address = socket.gethostbyname(service_name)
+
+                if service_address != self.node.url:
+                    discovered_services.append(service_name)
+                    logging.debug(f"Discovered service: {service_name}")
+
+            except socket.gaierror:
+                continue
+
+        if not discovered_services:
+            logging.warning("No services were discovered.")
+
+        return discovered_services
+
+    def ping_services(self, services, endpoint, current_node_url):
+        headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
 
         for service in services:
             service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/{endpoint}"
 
-            if service_base_url == self.node.url:
-                logging.debug(f"Skipping self sync trigger: {service_base_url}")
+            if service_base_url == current_node_url:
+                logging.debug(f"Skipping self ping: {service_base_url}")
                 continue
 
-            service_url = f"{service_base_url}/trigger_sync"
-            logging.debug(f"Attempting to trigger sync on {service_url}")
+            logging.debug(f"Attempting to ping {service_url}")
             try:
-                response = requests.post(service_url, json=data)
+                response = requests.get(service_url, headers=headers)
                 if response.status_code == 200:
-                    logging.debug(f"Successfully triggered sync on {service_url}")
+                    logging.debug(f"Successfully pinged {service_url}")
+                    received_nodes = response.json().get('nodes', [])
+                    for received_node in received_nodes:
+                        if not any(node['address'] == received_node['address'] for node in self.verifier.nodes):
+                            verifier.nodes.append(received_node)
+                            verifier.nodes.append(received_node)
+                            self.validators.append(received_node['address'])
+                            logging.debug(f"Added new node: {received_node['address']}")
                 else:
-                    logging.debug(f"Failed to trigger sync on {service_url}, status code: {response.status_code}")
+                    logging.debug(f"Failed to ping {service_url}, status code: {response.status_code}")
+
             except requests.exceptions.RequestException as e:
-                logging.error(f"Error triggering sync on {service_url}: {e}")
+                logging.error(f"Error pinging {service_url}: {e}")
 
-    def proof_of_stake(self, block):
-        logging.info("Starting proof of stake validation.")
+    def post_data_to_services(self, services, endpoint, data):
+        headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
 
-        total_stake_weight = sum(node['stake_weight'] if isinstance(node, dict) else node.stake_weight for node in self.node.nodes)
-        random_number = random.uniform(0, total_stake_weight)
-        cumulative_stake_weight = 0
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/{endpoint}"
 
-        logging.info(f"Total stake weight: {total_stake_weight}, Random number for validator selection: {random_number}")
+            if service_base_url == self.node.url:
+                logging.debug(f"Skipping self post: {service_url}")
+                continue
 
-        for current_node in self.node.nodes:
-            node_stake_weight = current_node['stake_weight'] if isinstance(current_node, dict) else current_node.stake_weight
-            cumulative_stake_weight += node_stake_weight
+            logging.debug(f"Attempting to post data to {service_url}")
+            try:
+                response = requests.post(service_url, json=data, headers=headers)
+                if response.status_code == 200:
+                    logging.debug(f"Successfully posted data to {service_url}")
+                else:
+                    logging.debug(f"Failed to post data to {service_url}, status code: {response.status_code}")
 
-            if cumulative_stake_weight > random_number:
-                selected_validator_address = current_node['address'] if isinstance(current_node, dict) else current_node.address
-                logging.info(f"Selected validator address: {selected_validator_address}, Stake weight: {node_stake_weight}")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error posting data to {service_url}: {e}")
 
-                if selected_validator_address == block['validator']:
-                    logging.info(f"Validator {selected_validator_address} matches the block's validator.")
-                    if node_stake_weight >= block['stake_threshold']:
-                        logging.info(f"Validator {selected_validator_address} meets the stake threshold.")
-                        return node_stake_weight
-                    else:
-                        logging.error(f"Validator {selected_validator_address} does not meet the stake threshold.")
-                        return 0
+    def broadcast_self_info(self):
+        if not self.node or not self.node.address or not self.node.url:
+            logging.error("Node information is incomplete or incorrect. Cannot broadcast.")
+            return
 
-        logging.error("No suitable validator found or the selected validator does not meet the stake threshold.")
-        return 0
+        node_info = self.node.to_dict()
+        logging.info(f"Broadcasting self node information: {node_info}")
 
-    def reach_consensus(self, proposed_block):
-        if len(self.validators) == 1:
-            logging.info("Automatically reaching consensus with single validator")
-            return True
+        services = self.discover_services("node")
+        if not services:
+            logging.warning("No other services discovered for broadcasting. Broadcast aborted.")
+            return
 
-        consensus_reached = self.vote_on_local_block(proposed_block)
+        services = [service for service in services if service != self.node.url]
+        if not services:
+            logging.warning("No external services discovered for broadcasting. Broadcast aborted.")
+            return
 
-        if consensus_reached:
-            logging.info("Consensus reached")
-            return True
-        else:
-            logging.info("Consensus not reached")
-            return False
+        self.post_data_to_services(services, "receive_node_info", node_info)
+        logging.info("Successfully broadcasted self node information to other services.")
 
-    def vote_on_local_block(self, block):
-        valid_votes = []
-        services = self.node.ledger.discover_services("node")
+    def update_validators(self):
+        services = self.discover_services("node")
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/node_info"
 
-        if len(services) == 1 and services[0] == self.node.url:
-            logging.info("Only one validator in the network, bypassing the voting process.")
-            valid_votes.append(self.node.url)
+            if service_base_url == self.node.url:
+                continue
+
+            try:
+                response = requests.get(service_url)
+                if response.status_code == 200:
+                    node_data = response.json()
+                    if node_data['address'] not in self.validators:
+                        self.validators.append(node_data['address'])
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Failed to retrieve node information from {service}: {e}")
+
+    def sync_with_other_nodes(self, services):
+        my_chain_length = len(self.chain)
+        synchronized_chain = None
+        authoritative_node_url = None
+
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/get_chain"
+
+            if service_base_url == self.node.url:
+                continue
+
+            try:
+                response = requests.get(service_url)
+                if response.status_code == 200:
+                    other_chain = response.json()["chain"]
+                    if len(other_chain) > my_chain_length:
+                        my_chain_length = len(other_chain)
+                        synchronized_chain = other_chain
+                        authoritative_node_url = service_base_url
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error while trying to sync with {service_url}: {e}")
+
+        if synchronized_chain:
+            self.chain = synchronized_chain
+
+        return authoritative_node_url, synchronized_chain
+
+    def broadcast_node_data(self, node):
+        headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+        node_data_complete = {
+            'address': node.address,
+            'public_key': node.public_key,
+            'url': node.url,
+            'stake_weight': node.stake_weight,
+            'version': node.version,
+            'steward': node.steward
+        }
+
+        services = self.discover_services("node")
+
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/receive_node_data"
+
+            if service_base_url == self.node.url:
+                continue
+
+            logging.debug(f"Broadcasting node data to {service_url}")
+            try:
+                response = requests.post(service_url, json=node_data_complete, headers=headers)
+                if response.status_code == 200:
+                    logging.debug(f"Successfully broadcasted node data to {service_url}")
+                else:
+                    logging.warning(f"Failed to broadcast node data to {service_url}, status code: {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error broadcasting node data to {service_url}: {e}")
+
+    def update_accounts(self, address, balance):
+        new_account = {
+            'address': address,
+            'balance': balance
+        }
+
+        service_prefix = "node"
+        services = self.discover_services(service_prefix)
 
         filtered_services = [s for s in services if f"http://{s}:3400" != self.node.url]
-        for service in filtered_services:
-            service_url = f"http://{service}:3400/vote_on_block"
+        self.post_data_to_services(filtered_services, "propagate_account", new_account)
 
-            try:
-                response = requests.post(service_url, json=block)
-                if response.status_code == 200 and response.json().get('message') == 'Block is valid':
-                    valid_votes.append(service)
-                    logging.info(f"Validator {service} approved the block.")
-                else:
-                    logging.info(f"Validator {service} did not approve the block.")
-            except requests.exceptions.RequestException as e:
-                logging.error(f"Error voting on block with {service}: {e}")
+    def update_node_state(self, new_node):
+        if new_node not in self.verifier.nodes:
+            verifier.nodes.append(new_node)
+            self.node.verifier.verified_nodes.append(new_node)
+            self.validators.append(new_node.address)
+            logging.info(f"Node {new_node.address} added to local state.")
 
-        return valid_votes
+    def mine_new_block_periodically(self, interval=9):
+        while True:
+            self.check_for_mining_opportunity()
+            time.sleep(interval * 60)
 
-    def validate_selected_validator(self, selected_validator, block):
-        if selected_validator.malicious or selected_validator not in self.verifier.verified_nodes:
+    def check_for_mining_opportunity(self):
+        num_transactions = len(self.transactions.transactions)
+        if num_transactions >= 1:
+            self.check_pending_transactions()
+        elif 4 <= num_transactions < 15 and self.is_time_to_mine():
+            self.check_pending_transactions()
+
+    def is_time_to_mine(self):
+        latest_block = self.chain[-1]
+        block_timestamp = datetime.strptime(latest_block['timestamp'], "%Y-%m-%d %H:%M:%S.%f%z")
+        current_timestamp = datetime.now(timezone.utc)
+        return (current_timestamp - block_timestamp).total_seconds() >= 8 * 60
+
+    def create_new_wallet(self):
+        mnemonic = crypto_utils.generate_mnemonic()
+        account = self.wallet.account_manager.generate_account_from_mnemonic(mnemonic)
+        account_manager.accounts.append(account_dict)
+        # Add the new address with a balance of zero to the self.balance dictionary
+        with coin.balance_lock:
+            coin.balance[account['address']] = 0.0
+
+        wallet_creation_transaction = {
+            'address': account['address'],
+            'balance': 0.0,
+            'withdrawals': 0,
+            'type': 'c'
+        }
+
+        cleaned_transaction = {
+            'address': wallet_creation_transaction['address'],
+            'balance': wallet_creation_transaction['balance'],
+            'pub_key': account['pub_key'],
+            'sub_type': 'c',
+            'type': wallet_creation_transaction['type'],
+            'withdrawals': wallet_creation_transaction['withdrawals']
+        }
+
+        initial_balance = 0.0
+
+        account_dict = {
+            'address': wallet_creation_transaction['address'],
+            'balance': initial_balance,
+        }
+
+        sendable_transaction = {
+            'mnemonic': mnemonic,
+            'private_key': base64.b64encode(account['private_key']).decode('utf-8'),
+            'pub_key': account['pub_key'],
+            'address': account['address'],
+        }
+
+        return sendable_transaction
+
+    def create_new_wallet_from_seed(self, seed):
+        account = self.wallet.account_manager.generate_account_from_mnemonic(seed)
+
+        wallet_creation_transaction = {
+            'address': account['address'],
+            'balance': 0.0,
+            'withdrawals': 0,
+            'type': 'c'
+        }
+
+        cleaned_transaction = {
+            'address': wallet_creation_transaction['address'],
+            'balance': wallet_creation_transaction['balance'],
+            'pub_key': account['pub_key'],
+            'type': wallet_creation_transaction['type'],
+            'withdrawals': wallet_creation_transaction['withdrawals']
+        }
+
+        sendable_transaction = {
+            'mnemonic': account['mnemonic'],
+            'private_key': base64.b64encode(account['private_key']).decode('utf-8'),
+            'pub_key': account['pub_key'],
+            'address': account['address'],
+        }
+
+        private_key_bytes = base64.b64decode(sendable_transaction['private_key'])
+        signature = crypto_utils.sign_transaction(private_key_bytes, wallet_creation_transaction)
+
+        cleaned_transaction['signature'] = signature
+
+        self.transactions.transactions.append(cleaned_transaction)
+        self.update_accounts(wallet_creation_transaction['address'], wallet_creation_transaction['balance'])
+
+        return sendable_transaction
+
+    def get_chain_length(self):
+        return len(self.chain) if hasattr(self, "blockchain") else 0
+
+    def check_chain_length_and_sync(self, services):
+        service_prefix = "node"
+        services = self.discover_services(service_prefix)
+
+        authoritative_node_url, synchronized_chain = self.sync_with_other_nodes(services)
+
+        self.sync_account_list_data(authoritative_node_url, account_manager, coin, staked_coin)
+        self.sync_treasury_data(authoritative_node_url)
+
+        self.ping_services(services, "check_nodes", self.node.url)
+
+        if synchronized_chain is not None:
+            return {
+                "chain": synchronized_chain,
+                "message": "Chain synchronized successfully"
+            }
+        else:
+            return {
+                "chain": self.chain,
+                "message": "Chain synchronization failed"
+            }
+
+    def sync_account_list_data(self, authoritative_node_url, account_manager, coin, staked_coin):
+        if not authoritative_node_url:
+            logging.error("No authoritative node URL provided for account list data synchronization.")
+            return
+
+        service_url = f"{authoritative_node_url}/retrieve_accounts"
+
+        try:
+            response = requests.get(service_url)
+            if response.status_code == 200:
+                data = response.json()
+
+                main_accounts = data.get('data', [])
+                for new_acc in main_accounts:
+                    if 'address' in new_acc and 'balance' in new_acc:
+                        account = next((acc for acc in account_manager.accounts if acc['address'] == new_acc['address']), None)
+                        if account:
+                            account['balance'] = new_acc['balance']
+                            coin.balance[new_acc['address']] = new_acc['balance']
+                            logging.info(f"Updated main account {new_acc['address']} for {coin.name}.")
+                        else:
+                            account_manager.accounts.append(new_acc)
+                            coin.balance[new_acc['address']] = new_acc['balance']
+                            logging.info(f"Added new main account {new_acc['address']} for {coin.name}.")
+
+                precursor_accounts = data.get('precursor_accounts', [])
+                for new_acc in precursor_accounts:
+                    if 'address' in new_acc and 'balance' in new_acc:
+                        account = next((acc for acc in account_manager.precursor_accounts if acc['address'] == new_acc['address']), None)
+                        if account:
+                            account['balance'] = new_acc['balance']
+                            coin.balance[new_acc['address']] = new_acc['balance']
+                            logging.info(f"Updated precursor account {new_acc['address']} for {coin.name}.")
+                        else:
+                            account_manager.precursor_accounts.append(new_acc)
+                            coin.balance[new_acc['address']] = new_acc['balance']
+                            logging.info(f"Added new precursor account {new_acc['address']} for {coin.name}.")
+
+                staking_accounts = data.get('staking_accounts', [])
+                for new_acc in staking_accounts:
+                    if 'address' in new_acc and 'min_term' in new_acc:
+                        account = next((acc for acc in staking_manager.staking_agreements if acc['address'] == new_acc['address']), None)
+                        if account:
+                            account['amount'] = new_acc['amount']
+                            account['withdrawals'] = new_acc['withdrawals']
+                            staked_coin.balance[new_acc['address']] = new_acc['amount']
+                            logging.info(f"Updated staking account {new_acc['address']} for {staked_coin.name}.")
+                        else:
+                            staked_coin.accounts.append(new_acc)
+                            staking_manager.staking_agreements.append(new_acc)
+                            staked_coin.balance[new_acc['address']] = new_acc['amount']
+                            logging.info(f"Added new staking account {new_acc['address']} for {staked_coin.name}.")
+
+                self.validators = data.get('validators', [])
+                if self.node.address not in self.validators:
+                    self.validators.append(self.node.address)
+
+                notification_data = {"message": "Data updated from authoritative node"}
+                self.post_data_to_services(self.discover_services("node"), "notify_data_update", notification_data)
+
+                logging.warning(f"Synchronized account list data with the authoritative node: {authoritative_node_url}")
+            else:
+                logging.error(f"Failed to retrieve account data from {service_url}, status code: {response.status_code}")
+        except requests.RequestException as e:
+            logging.error(f"Error retrieving account data from {service_url}: {e}")
+            
+    def sync_treasury_data(self, authoritative_node_url):
+        if not authoritative_node_url:
+            logging.error("No authoritative node URL provided for treasury data synchronization.")
             return False
 
-        if selected_validator.address == block['validator'] and \
-                selected_validator.stake_weight >= block['stake_threshold']:
-            return True
+        service_url = f"{authoritative_node_url}/retrieve_treasury_data"
 
+        try:
+            response = requests.get(service_url)
+            if response.status_code == 200:
+                response_data = response.json()
+                if 'treasury_account' in response_data:
+                    self.treasury.update_treasury_data(response_data['treasury_account'])
+                    logging.warning("Synchronized treasury data with the authoritative node: %s", authoritative_node_url)
+                    return True
+                else:
+                    logging.error(f"No treasury account data found in the response from {service_url}")
+                    return False
+            else:
+                logging.error(f"Failed to retrieve treasury data from {service_url}, status code: {response.status_code}")
+                return False
+        except requests.RequestException as e:
+            logging.error(f"Error retrieving treasury data from {service_url}: {e}")
+            return False
+
+    def add_account(self, account_data):
+        address = account_data.get('address')
+        balance_float = account_data.get('balance_float', 0)
+        new_account = {}
+        new_account['address'] = address
+        new_account['balance'] = balance_float
+
+        account_manager.accounts.append(new_account)
+        coin.balance[address] = balance_float
+
+        logging.info(f"Added/Updated account: {address} with balance {balance_float}")
+
+    def add_staking_account(self, data):
+        account_manager.staking_accounts.append(data)
+        staked_coin.accounts.append(data)
+        staking_manager.staking_accounts.append(data)
+
+    def get_init_date(self):
+        return coin.init_date
+
+    def validate_chain(self, chain):
+        previous_block = chain[0]
+        for block in chain[1:]:
+            if block['previous_hash'] != previous_block['hash']:
+                return False
+
+            block_data = block.copy()
+            block_data.pop('hash')
+            calculated_hash = self.calculate_block_hash(block_data)
+
+            if block['hash'] != calculated_hash:
+                return False
+
+            if not self.validate_stake(block):
+                return False
+
+            previous_block = block
+
+        return True
+
+    def add_block(self, block):
+        logging.info(f"Attempting to add block with index {block['index']}")
+        if self.validate_received_block(block):
+            with self.lock:
+                if block['index'] == len(self.chain) + 1 and \
+                   block['previous_hash'] == self.chain[-1]['hash']:
+                    self.chain.append(block)
+                    self.block_hashes.add(block['hash'])
+                    logging.info(f"Block with index {block['index']} successfully added to the chain.")
+                    self.broadcast_block(block)
+                    return True
+                else:
+                    logging.warning(f"Block with index {block['index']} failed to match chain continuity.")
+        else:
+            logging.warning(f"Block with index {block['index']} failed validation.")
         return False
+    
+    def broadcast_block(self, new_block):
+        block_data = json.dumps(new_block)
 
+        service_prefix = "node"
+        services = self.discover_services(service_prefix)
+
+        self.post_data_to_services(services, "blocks/receive_block", block_data)
+        
     def validate_foreign_tx(self, address, hash, pub_key, tx, signature):
         logging.debug(f"Validating tx from {address}")
 
@@ -2557,7 +3582,7 @@ class SWRVS:
 
     def vote_on_local_tx(self, address, hash, pub_key, tx, signature):
         valid_votes = []
-        services = self.node.ledger.discover_services("node")
+        services = ledger.discover_services("node")
 
         if len(services) == 1 and services[0] == self.node.url:
             logging.info("Only one validator in the network, bypassing the voting process.")
@@ -2613,27 +3638,17 @@ class SWRVS:
 
     def receive_block(self, block):
         try:
-            services = self.node.ledger.discover_services("node")
-            authoritative_node_url, _ = self.node.ledger.sync_with_other_nodes(services)
+            services = ledger.discover_services("node")
+            authoritative_node_url, _ = ledger.sync_with_other_nodes(services)
 
             if authoritative_node_url:
-                self.node.ledger.sync_account_list_data(authoritative_node_url, account_manager, coin, staked_coin)
-                self.node.ledger.sync_treasury_data(authoritative_node_url)
+                ledger.sync_account_list_data(authoritative_node_url, account_manager, coin, staked_coin)
+                ledger.sync_treasury_data(authoritative_node_url)
 
             return True
         except Exception as e:
             logging.error(f"Error processing received block: {str(e)}")
             return False
-
-    def select_validator(self, block):
-        selected_validator = self.verifier.select_validator(block)
-        return selected_validator if selected_validator else None
-
-    def add_malicious_validator(self, validator_address):
-        for node in self.node.nodes:
-            if node.address == validator_address:
-                node.malicious = True
-                break
 
     def broadcast_tx(self, address, hash, pub_key, new_tx, signature):
         data = {
@@ -2644,19 +3659,5832 @@ class SWRVS:
             'signature': signature
         }
 
-        services = self.node.ledger.discover_services("node")
+        services = ledger.discover_services("node")
 
-        self.node.ledger.post_data_to_services(services, "transaction/receive_tx", data)
+        ledger.post_data_to_services(services, "transaction/receive_tx", data)
+
+        return True
+    
+    def randomly_select_validator(self):
+        if not self.validators:
+            logging.warning("No validators available.")
+            return None
+
+        validator_address = random.choice(self.validators)
+        logging.info(f"Randomly selected validator address: {validator_address}")
+        return validator_address
+
+    def trigger_sync_on_all_nodes(self):
+        services = ledger.discover_services("node")
+
+        data = {}
+
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+
+            if service_base_url == self.node.url:
+                logging.debug(f"Skipping self sync trigger: {service_base_url}")
+                continue
+
+            service_url = f"{service_base_url}/trigger_sync"
+            logging.debug(f"Attempting to trigger sync on {service_url}")
+            try:
+                response = requests.post(service_url, json=data)
+                if response.status_code == 200:
+                    logging.debug(f"Successfully triggered sync on {service_url}")
+                else:
+                    logging.debug(f"Failed to trigger sync on {service_url}, status code: {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error triggering sync on {service_url}: {e}")
+
+    def validate_received_block(self, block):
+        logging.debug(f"Validating received block with index {block['index']}")
+        if not self.validate_block_structure(block):
+            logging.error("Block structure validation failed.")
+            return False
+
+        if not self.validate_block(block):
+            logging.error("Block content validation failed.")
+            return False
+
+        if block['index'] != len(self.chain) + 1:
+            logging.error(f"Block index {block['index']} does not follow the current chain length.")
+            return False
 
         return True
 
+    def validate_block_structure(self, block):
+        logging.debug(f"Checking block structure for block with index {block['index']}")
+        required_fields = [
+            'index', 'previous_hash', 'timestamp', 'transactions',
+            'merkle_root', 'stake_threshold', 'hash', 'miner', 'miner_share',
+            'validator', 'validator_share', 'fee'
+        ]
+
+        missing_fields = [field for field in required_fields if field not in block]
+        if missing_fields:
+            logging.error(f"Block missing required fields: {missing_fields}")
+            return False
+
+        field_type_issues = False
+        for field in required_fields:
+            if field in block:
+                expected_type = (int if field in ['index', 'timestamp'] else
+                                 str if field in ['previous_hash', 'hash', 'miner', 'validator', 'merkle_root'] else
+                                 list if field == 'transactions' else
+                                 (int, float) if field in ['stake_threshold', 'fee', 'miner_share', 'validator_share'] else
+                                 None)
+                actual_type = type(block[field])
+                if not isinstance(block[field], expected_type):
+                    logging.error(f"Field '{field}' type mismatch: expected {expected_type}, got {actual_type}")
+                    field_type_issues = True
+            else:
+                logging.error(f"Field '{field}' is missing from the block.")
+                field_type_issues = True
+
+        if field_type_issues:
+            logging.error("One or more block field types are incorrect.")
+            return False
+
+        logging.debug("Block structure validated successfully.")
+        return True
+    
+    def reach_consensus(self, proposed_block):
+        if len(self.validators) == 1:
+            logging.info("Automatically reaching consensus with single validator")
+            return True
+
+        consensus_reached = self.vote_on_local_block(proposed_block)
+
+        if consensus_reached:
+            logging.info("Consensus reached")
+            return True
+        else:
+            logging.info("Consensus not reached")
+            return False
+
+    def vote_on_local_block(self, block):
+        valid_votes = []
+        services = self.discover_services("node")
+
+        if len(services) == 1 and services[0] == self.node.url:
+            logging.info("Only one validator in the network, bypassing the voting process.")
+            valid_votes.append(self.node.url)
+
+        filtered_services = [s for s in services if f"http://{s}:3400" != self.node.url]
+        for service in filtered_services:
+            service_url = f"http://{service}:3400/vote_on_block"
+
+            try:
+                response = requests.post(service_url, json=block)
+                if response.status_code == 200 and response.json().get('message') == 'Block is valid':
+                    valid_votes.append(service)
+                    logging.info(f"Validator {service} approved the block.")
+                else:
+                    logging.info(f"Validator {service} did not approve the block.")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error voting on block with {service}: {e}")
+
+        return valid_votes
+
+    def validate_block(self, block):
+        logging.debug(f"Validating block with index {block['index']}")
+        if block['validator'] not in self.validators:
+            logging.error("Block validator is not recognized.")
+            return False
+
+        if not self.proof_of_stake(block):
+            return False
+
+        unique_addresses = set()
+        double_spent_addresses = set()
+        for transaction in block['transactions']:
+            sender_address = transaction.get('address')
+            if sender_address in unique_addresses:
+                double_spent_addresses.add(sender_address)
+            unique_addresses.add(sender_address)
+
+        if double_spent_addresses:
+            logging.error(f"Double spending detected for addresses: {', '.join(double_spent_addresses)}")
+            raise DoubleSpendingError("Double spending detected for addresses: " + ', '.join(double_spent_addresses))
+
+        block_string = str(block['index']) + str(block['timestamp']) + str(block['previous_hash']) + str(
+            block['transactions']) + str(block['fee']) + str(block['validator']) + str(block['validator_share'])
+
+        generated_hash = hashlib.sha256(block_string.encode()).hexdigest()
+        if block['hash'] != generated_hash:
+            logging.error("Block hash does not match the generated hash.")
+            return False
+
+        if not self.reach_consensus(block):
+            logging.error("Failed to reach consensus.")
+            return False
+
+        logging.info(f"Block with index {block['index']} passed all validations.")
+        return True
+
+    def validate_foreign_block(self, block):
+        logging.debug(f"Validating block with index {block['index']}")
+        if block['validator'] not in self.validators:
+            logging.error("Block validator is not recognized.")
+            return False
+
+        if not self.proof_of_stake(block):
+            return False
+
+        unique_addresses = set()
+        double_spent_addresses = set()
+        for transaction in block['transactions']:
+            sender_address = transaction.get('address')
+            if sender_address in unique_addresses:
+                double_spent_addresses.add(sender_address)
+            unique_addresses.add(sender_address)
+
+        if double_spent_addresses:
+            logging.error(f"Double spending detected for addresses: {', '.join(double_spent_addresses)}")
+            raise DoubleSpendingError("Double spending detected for addresses: " + ', '.join(double_spent_addresses))
+
+        block_string = str(block['index']) + str(block['timestamp']) + str(block['previous_hash']) + str(
+            block['transactions']) + str(block['fee']) + str(block['validator']) + str(block['validator_share'])
+
+        generated_hash = hashlib.sha256(block_string.encode()).hexdigest()
+        if block['hash'] != generated_hash:
+            logging.error("Block hash does not match the generated hash.")
+            return False
+
+        return True
+
+    def generate_block_hash(self, block):
+        transactions_string = json.dumps(block['transactions'], sort_keys=True)
+
+        block_contents = (
+            str(block['index']) +
+            str(block['timestamp']) +
+            str(block['previous_hash']) +
+            transactions_string +
+            str(block['fee']) +
+            str(block['miner']) +
+            str(block['miner_share']) +
+            str(block['validator']) +
+            str(block['validator_share'])
+        )
+
+        block_hash = hashlib.sha256(block_contents.encode()).hexdigest()
+        return block_hash
+    
+    def proof_of_stake(self, block):
+        logging.info("Starting proof of stake validation.")
+
+        total_stake_weight = sum(node['stake_weight'] if isinstance(node, dict) else node.stake_weight for node in self.verifier.nodes)
+        random_number = random.uniform(0, total_stake_weight)
+        cumulative_stake_weight = 0
+
+        logging.info(f"Total stake weight: {total_stake_weight}, Random number for validator selection: {random_number}")
+
+        for current_node in self.verifier.nodes:
+            node_stake_weight = current_node['stake_weight'] if isinstance(current_node, dict) else current_node.stake_weight
+            cumulative_stake_weight += node_stake_weight
+
+            if cumulative_stake_weight > random_number:
+                selected_validator_address = current_node['address'] if isinstance(current_node, dict) else current_node.address
+                logging.info(f"Selected validator address: {selected_validator_address}, Stake weight: {node_stake_weight}")
+
+                if selected_validator_address == block['validator']:
+                    logging.info(f"Validator {selected_validator_address} matches the block's validator.")
+                    if node_stake_weight >= block['stake_threshold']:
+                        logging.info(f"Validator {selected_validator_address} meets the stake threshold.")
+                        return node_stake_weight
+                    else:
+                        logging.error(f"Validator {selected_validator_address} does not meet the stake threshold.")
+                        return 0
+
+        logging.error("No suitable validator found or the selected validator does not meet the stake threshold.")
+        return 0
+
+    def add_coin_transaction(self, address: str, amount: int, converted_amount: Union[int, float], fee: Union[int, float], hash: str, pub_key: str, signature: str, sub_type: str, type: str) -> Union[bool, str]:
+
+        cleaned_transaction = {
+            'address': address,
+            'amount': amount,
+            'converted_amount': converted_amount,
+            'fee': fee,
+            'hash': hash,
+            'pub_key': pub_key,
+            'signature': signature,
+            'sub_type': sub_type,
+            'type': type
+        }
+
+        if cleaned_transaction['signature']:
+            return cleaned_transaction
+        
+    def select_miner(self) -> dict:
+        accounts = staking_manager.staking_agreements
+
+        # Calculate the number of withdrawals for each account
+        for account in accounts:
+            account['withdrawals'] = sum(1 for block in self.chain for transaction in block['transactions']
+                             if 'address' in transaction and transaction.get('address') == account['address'])
+
+            # Select the miner based on weighted selection
+            miner = self.weighted_selection(accounts)
+
+            return miner
+
+    def weighted_selection(self, accounts: List[dict]) -> dict:
+        # Calculate weights based on the number of withdrawals for each account
+        weights = [1 / (acc['withdrawals'] + 1) for acc in accounts]
+        total_weight = sum(weights)
+
+        # Normalize the weights to ensure their sum is 1
+        normalized_weights = [weight / total_weight for weight in weights]
+
+        # Select an account using the normalized weights
+        chosen_account = random.choices(
+            accounts, weights=normalized_weights, k=1)[0]
+        return chosen_account
+
+    def calculate_fee_distribution(self, total_fee):
+        fee_distribution = {}
+
+        validator_percentage = 0.45
+        miner_percentage = 0.315
+        treasury_percentage = 0.235  # Updated to include the burn percentage
+
+        fee_distribution['validator_share'] = total_fee * validator_percentage
+        fee_distribution['miner_share'] = total_fee * miner_percentage
+        fee_distribution['treasury_share'] = total_fee * treasury_percentage
+
+        return fee_distribution
+    
+    def select_validator(self, block):
+        selected_validator = self.verifier.select_validator(block)
+        return selected_validator if selected_validator else None
+
+    def validate_selected_validator(self, selected_validator, block):
+        if selected_validator.malicious or selected_validator not in verifier.verified_nodes:
+            return False
+
+        if selected_validator.address == block['validator'] and \
+                selected_validator.stake_weight >= block['stake_threshold']:
+            return True
+
+        return False
+
+    def add_malicious_validator(self, validator_address):
+        for node in self.nodes:
+            if node.address == validator_address:
+                node.malicious = True
+                break
+
+    def create_new_block(self, transactions):
+        latest_block = self.chain[-1]
+        block_index = latest_block['index'] + 1
+        timestamp = int(datetime.now(timezone.utc).timestamp())
+        previous_hash = latest_block['hash']
+        stake_threshold = node.stake_weight
+
+        processed_transactions, total_fee = self.process_transactions(transactions)
+
+        block_fee = coin.mint_for_block_fee(total_fee)
+
+        fee_distribution = self.calculate_fee_distribution(block_fee)
+
+        miner = self.select_miner()
+        miner_address = miner['address']
+
+        block = {
+            'index': block_index,
+            'timestamp': timestamp,
+            'previous_hash': previous_hash,
+            'transactions': processed_transactions,
+            'stake_threshold': stake_threshold,
+            'fee': block_fee
+        }
+
+        validator_node = self.select_validator(block)
+
+        if not validator_node:
+            logging.warning("No validator selected, assigning default validator.")
+            validator_address = self.node.address
+        else:
+            validator_address = validator_node.address if isinstance(validator_node, Node) else validator_node['address']
+
+        for transaction in transactions:
+            merkle_tree.add_transaction(str(transaction))
+
+        merkle_tree.create_tree()
+        merkle_root = merkle_tree.get_merkle_root()
+        
+        coin.credit(validator_address, fee_distribution['validator_share'])
+        
+        coin.credit(miner_address, fee_distribution['miner_share'])
+
+        coin.credit(coin.treasury_address, fee_distribution['treasury_share'])
+
+        new_block = {
+            'index': block_index,
+            'timestamp': timestamp,
+            'previous_hash': previous_hash,
+            'transactions': processed_transactions,
+            'merkle_root': merkle_root,
+            'stake_threshold': stake_threshold,
+            'fee': block_fee,
+            'miner': miner_address,
+            'miner_share': fee_distribution['miner_share'],
+            'validator': validator_address,
+            'validator_share': fee_distribution['validator_share'],
+            'treasury_share': fee_distribution['treasury_share']
+        }
+
+        logging.info(f"constructed block: {new_block}")
+
+        block_string = str(new_block['index']) + str(new_block['timestamp']) + str(new_block['previous_hash']) + str(
+            new_block['transactions']) + str(new_block['fee']) + str(new_block['validator']) + str(new_block['validator_share'])
+
+        block_hash = hashlib.sha256(block_string.encode()).hexdigest()
+
+        new_block['hash'] = block_hash
+
+        if self.add_block(new_block):
+            self.transactions.cleaned_transactions = []
+            logging.info(f"Successfully mined new block: {new_block}")
+            return new_block
+        else:
+            logging.debug(f"Issue mining block: {new_block}")
+
+    def process_transactions(self, transactions):
+        processed_transactions = []
+        total_fee = 0.0
+
+        for transaction in transactions:
+            transaction_type = transaction.get('sub_type')
+
+            if transaction_type == 'r':
+                processed_transaction = self.handle_staking_transaction(transaction)
+            elif transaction_type == 'o':
+                processed_transaction = self.handle_unstaking_transaction(transaction)
+            elif transaction_type == 'k':
+                processed_transaction = self.handle_transfer_transaction(transaction)
+            elif transaction_type == 'w':
+                processed_transaction = self.handle_pomc_whitelist_transaction(transaction)
+            elif transaction_type in ['h', 'x', 'm', 'pr']:
+                processed_transaction = self.handle_fee_payment_transaction(transaction)
+            else:
+                processed_transaction = self.handle_default_transaction(transaction)
+
+            if processed_transaction:
+                processed_transactions.append(processed_transaction)
+                total_fee += processed_transaction.get('fee', 0.0)
+
+        return processed_transactions, total_fee
+
+    def handle_staking_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            sender_address = transaction['address']
+            staking_amount = transaction['amount']
+            min_term = transaction['min_term']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            transaction_data = {
+                'address': sender_address,
+                'amount': staking_amount,
+                'min_term': min_term,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            transaction_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            if not all([sender_address, staking_amount, min_term, pub_key, signature]):
+                logging.error("Missing fields in staking transaction")
+                return None
+
+            sender_balance_info = self.wallet.get_account_balance(sender_address)
+            if not sender_balance_info or sender_balance_info['balance_float'] < staking_amount + transaction_fee:
+                logging.error("Insufficient balance for staking")
+                return None
+
+            transaction_for_verification = {
+                'address': sender_address,
+                'amount': staking_amount,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'min_term': min_term,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            if not crypto_utils.verify_transaction(transaction['pub_key'], transaction_for_verification, transaction['signature']):
+                logging.error("Invalid signature in staking transaction")
+                return None
+
+            self.wallet.stake_coins(sender_address, staking_amount, min_term)
+
+            processed_transaction = {
+                'address': sender_address,
+                'amount': staking_amount,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'min_term': min_term,
+                'stake_threshold': 3,
+                'type': transaction['type'],
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed staking transaction for {sender_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing staking transaction: {e}")
+            return None
+
+    def handle_unstaking_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            sender_address = transaction['address']
+            contract_id = transaction['contract_id']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            transaction_data = {
+                'address': sender_address,
+                'contract_id': contract_id,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            transaction_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            if not all([sender_address, contract_id, pub_key, signature]):
+                logging.error("Missing fields in unstaking transaction")
+                return None
+
+            sender_balance_info = self.wallet.get_account_balance(sender_address)
+            if not sender_balance_info or sender_balance_info['balance_float'] < transaction_fee:
+                logging.error("Insufficient balance for unstaking")
+                return None
+
+            transaction_for_verification = {
+                'address': sender_address,
+                'contract_id': contract_id,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            if not crypto_utils.verify_transaction(transaction['pub_key'], transaction_for_verification, transaction['signature']):
+                logging.error("Invalid signature in unstaking transaction")
+                return None
+
+            self.wallet.unstake_coins(sender_address, contract_id)
+
+            processed_transaction = {
+                'address': sender_address,
+                'contract_id': contract_id,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'stake_threshold': 2,
+                'type': transaction['type'],
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed unstaking transaction for {sender_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing unstaking transaction: {e}")
+            return None
+
+    def handle_transfer_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            sender_address = transaction['sender']
+            recipient_address = transaction['recipient']
+            transfer_amount = transaction['amount']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            transaction_data = {
+                'sender': sender_address,
+                'recipient': recipient_address,
+                'amount': transfer_amount,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            transaction_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            if not all([sender_address, recipient_address, transfer_amount, pub_key, signature]):
+                logging.error("Missing fields in transfer transaction")
+                return None
+
+            sender_balance_info = self.wallet.get_account_balance(sender_address)
+            if not sender_balance_info or sender_balance_info['balance_float'] < transfer_amount + transaction_fee:
+                logging.error("Insufficient balance for transfer")
+                return None
+
+            transaction_for_verification = {
+                'sender': sender_address,
+                'recipient': recipient_address,
+                'amount': transfer_amount,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            if not crypto_utils.verify_transaction(transaction['pub_key'], transaction_for_verification, transaction['signature']):
+                logging.error("Invalid signature in transfer transaction")
+                return None
+
+            self.wallet.transfer(sender_address, recipient_address, transfer_amount)
+
+            processed_transaction = {
+                'sender': sender_address,
+                'recipient': recipient_address,
+                'amount': transfer_amount,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'stake_threshold': 2,
+                'type': transaction['type'],
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed transfer transaction from {sender_address} to {recipient_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing transfer transaction: {e}")
+            return None
+    
+    def handle_pomc_whitelist_transaction(self, transaction):
+        try:
+            
+            sender_address = transaction['sender']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            processed_transaction = {
+                'fee': transaction['fee'],
+                'hash': transaction['hash'],
+                'sender': transaction['sender'],
+                'sub_type': transaction['sub_type'],
+                'stake_threshold': 2,
+                'type': transaction['type'],
+                'when': transaction['when']
+            }
+
+            logging.info(f"Processed transfer transaction from {sender_address} to join pOMC whitelist")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing transfer transaction: {e}")
+            return None
+
+    def handle_fee_payment_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            payer_address = transaction['from']
+            fee_amount = transaction['fee']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            transaction_data = {
+                'from': payer_address,
+                'fee': fee_amount,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            calculated_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            if not all([payer_address, fee_amount, pub_key, signature]):
+                logging.error("Missing fields in fee payment transaction")
+                return None
+
+            payer_balance_info = self.wallet.get_account_balance(payer_address)
+            if not payer_balance_info or payer_balance_info['balance_float'] < fee_amount + calculated_fee:
+                logging.error("Insufficient balance for fee payment")
+                return None
+
+            transaction_for_verification = {
+                'from': payer_address,
+                'fee': calculated_fee,
+                'hash': transaction_hash,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            if not crypto_utils.verify_transaction(transaction['pub_key'], transaction_for_verification, transaction['signature']):
+                logging.error("Invalid signature in fee payment transaction")
+                return None
+
+            self.wallet.pay_fee(payer_address, fee_amount)
+
+            processed_transaction = {
+                'from': payer_address,
+                'fee': calculated_fee,
+                'hash': transaction_hash,
+                'stake_threshold': 2,
+                'type': transaction['type'],
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed fee payment transaction from {payer_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing fee payment transaction A1: {e}")
+            return None
+
+    def handle_default_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            payer_address = transaction['address']
+
+            transaction_data = {
+                'from': payer_address,
+                'type': 'e'
+            }
+
+            calculated_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            processed_transaction = {
+                'from': payer_address,
+                'fee': 0.0,
+                'hash': transaction_hash,
+                'stake_threshold': 1,
+                'type': 'e',
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed fee payment transaction from {payer_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing fee payment transaction A2: {e}")
+            return None
+
+    def clean_and_verify_transactions(self):
+        new_transactions = self.transactions.batch_pending_transactions()
+        cleaned_transactions = []
+
+        for transaction in new_transactions:
+            try:
+                if transaction['type'] == 'c' and transaction['sub_type'] == 'c':
+                    self.process_account_creation_transaction(transaction)
+                elif transaction['type'] == 'c' and transaction['sub_type'] == 'w':
+                    self.process_add_account_to_whitelist_transaction(transaction)
+                elif transaction['type'] == 'o':
+                    self.process_non_f_transaction(transaction)
+                elif transaction['type'] == 'e':
+                    self.process_f_transaction(transaction)
+            except Exception as e:
+                logging.error(f"Error processing transaction {transaction['type']}: {e}")
+
+        return cleaned_transactions
+    
+    def process_account_creation_transaction(self, transaction):
+        # Verify that the transaction is of the correct type
+        if transaction['type'] != 'c':
+            logging.error(f"Invalid transaction type for account creation: {transaction['type']}")
+            return
+
+        try:
+            # Extract necessary fields from the transaction
+            address = transaction['address']
+            balance = transaction['balance']
+            type = transaction['type']
+            timestamp = ['timestamp']
+            withdrawals = transaction['withdrawals']
+
+            # Validate the transaction data
+            if not all([address, type]):
+                logging.error("Incomplete account creation transaction data")
+                return
+
+            # Check if the address already exists in the blockchain wallet
+            # if any(acc['address'] == address for acc in account_manager.accounts):
+            #     logging.info(f"Account already exists: {address}")
+            #     return
+
+            # # Create and append the new account to the wallet
+            # new_account = {
+            #     'address': address,
+            #     'balance': balance,
+            #     'withdrawals': withdrawals
+            # }
+            # account_manager.accounts.append(new_account)
+
+            # Create a cleaned version of the transaction for the blockchain
+            cleaned_transaction = {
+                'address': address,
+                'hash': transaction.get('hash'),
+                'pub_key': transaction['pub_key'],
+                'signature': transaction['signature'],
+                'sub_type': 'c',
+                'type': transaction['type'],
+                'withdrawals': withdrawals
+            }
+
+            # Append the cleaned transaction to the list of processed transactions
+            self.transactions.cleaned_transactions.append(cleaned_transaction)
+            logging.info(f"Processed account creation transaction for {address}")
+
+        except Exception as e:
+            logging.error(f"Error processing account creation transaction A2: {e}")
+            
+    def process_add_account_to_whitelist_transaction(self, transaction):
+        # Verify that the transaction is of the correct type
+        if transaction['type'] != 'c':
+            logging.error(f"Invalid transaction type to add account to whitelist: {transaction['type']}")
+            return
+
+        try:
+            result = {
+                'fee': transaction['fee'],
+                'hash': transaction['hash'],
+                'pub_key': transaction['pub_key'],
+                'sender': transaction['sender'],
+                'signature': transaction['signature'],
+                'sub_type': transaction['sub_type'],
+                'type': transaction['type'],
+                'when': transaction['when']
+            }
+            # Extract necessary fields from the transaction
+            address = transaction['sender']
+            hash = transaction['hash']
+            type = transaction['type']
+
+            # Validate the transaction data
+            if not all([address, hash, type]):
+                logging.error("Incomplete account creation transaction data")
+                return
+
+            # Create a cleaned version of the transaction for the blockchain
+            cleaned_transaction = {
+                'fee': transaction['fee'],
+                'hash': transaction['hash'],
+                'pub_key': transaction['pub_key'],
+                'sender': transaction['sender'],
+                'signature': transaction['signature'],
+                'sub_type': transaction['sub_type'],
+                'type': transaction['type'],
+                'when': transaction['when']
+            }
+
+            # Append the cleaned transaction to the list of processed transactions
+            self.transactions.cleaned_transactions.append(cleaned_transaction)
+            logging.info(f"Processed join whitelist transaction for {address}")
+
+        except Exception as e:
+            logging.error(f"Error processing join whiteist transaction A2: {e}")
+
+    def process_f_transaction(self, transaction):
+        try:
+            transaction_type = transaction.get('type')
+            sender_address = transaction.get('address')
+            transaction_fee = transaction.get('fee', 0.0)
+
+            if not sender_address or transaction_fee is None:
+                logging.error("Invalid transaction format.")
+                return None
+
+            cleaned_transaction = None
+
+            if transaction_type == 'e':
+                sub_tx_type = transaction.get('sub_type')
+
+                if sub_tx_type == 'p':
+                    amount = transaction.get('amount')
+                    recipient_address = transaction.get('recipient')
+
+                    if crypto_utils.verify_transaction(sender_address, recipient_address, amount):
+                        self.wallet.transfer(sender_address, recipient_address, amount)
+
+                elif sub_tx_type == 'r':
+                    amount = transaction.get('amount')
+                    min_term = transaction.get('min_term')
+
+                    self.wallet.stake_coins(sender_address, amount, min_term)
+
+                elif sub_tx_type == 'z':
+                    contract_id = transaction.get('contract_id')
+
+                    self.wallet.unstake_coins(sender_address, contract_id)
+
+            if cleaned_transaction:
+                self.transactions.cleaned_transactions.append(cleaned_transaction)
+                logging.info(f"Processed transaction of type {transaction_type} for {sender_address}")
+                return cleaned_transaction
+            else:
+                logging.warning(f"Unhandled or failed transaction type/subtype: {transaction_type}/{sub_tx_type}")
+                return None
+
+        except Exception as e:
+            logging.error(f"Error processing account creation transaction A2: {e}")
+
+    def process_non_f_transaction(self, transaction):
+        try:
+            transaction_type = transaction.get('type')
+            sender_address = transaction.get('address')
+            transaction_fee = transaction.get('fee', 0.0)
+
+            if not sender_address or transaction_fee is None:
+                logging.error("Invalid transaction format.")
+                return None
+
+            cleaned_transaction = None
+
+            if transaction_type == 'o':
+                sub_tx_type = transaction.get('sub_type')
+
+                if sub_tx_type == 's':
+                    self.handle_post_transaction(transaction)
+
+                elif sub_tx_type == 'j':
+                    refined_transaction = self.handle_add_profile_transaction(transaction)
+                    if refined_transaction:
+                        cleaned_transaction = {
+                            'address': transaction['address'],
+                            'avi': transaction['avi'],
+                            'clubs': transaction['clubs'],
+                            'fee': transaction['fee'],
+                            'handle': transaction['handle'],
+                            'hash': transaction['hash'],
+                            'intro': transaction['intro'],
+                            'joined': transaction['joined'],
+                            'name': transaction['name'],
+                            'profile_id': transaction['profile_id'],
+                            'profile_type': transaction['profile_type'],
+                            'pt': transaction['pt'],
+                            'pt_id': transaction['pt_id'],
+                            'pub_key': transaction['pub_key'],
+                            'signature': transaction['signature'],
+                            'sub_type': transaction['sub_type'],
+                            'tags': transaction['tags'],
+                            'type': transaction['type'],
+                            'version': transaction['version']
+                        }
+
+            if cleaned_transaction:
+                transactions.cleaned_transactions.append(cleaned_transaction)
+                logging.info(f"Processed transaction of type {transaction_type} for {sender_address}")
+                return cleaned_transaction
+            else:
+                logging.warning(f"Unhandled or failed transaction type/subtype: {transaction_type}/{sub_tx_type}")
+                return None
+
+        except Exception as e:
+            logging.error(f"Error processing transaction: {e}")
+            return None
+
+    def start_mining(self):
+        self.create_new_block(self.transactions.cleaned_transactions)
+
+    def check_pending_transactions(self):
+        self.clean_and_verify_transactions()
+        self.start_mining()
+
+    def get_latest_block(self):
+        return self.chain[-1]
+
+    def main_loop(self):
+        while True:
+            self.start_mining()
+            self.consume_blocks()
+
+    def consume_blocks(self):
+        for message in self.consumer:
+            block_data = message.value.decode('utf-8')
+            block = json.loads(block_data)
+            self.receive_block(block)
+    @staticmethod
+    def list_endpoints(app: Flask):
+        """
+        List all the endpoints in a Flask application.
+
+        :param app: Flask application instance
+        :return: List of endpoint rules
+        """
+        endpoints = []
+        for rule in app.url_map.iter_rules():
+            endpoints.append(rule.rule)
+        return endpoints
+
+    @staticmethod
+    def register_endpoints(app: Flask, registry_url: str, node_address: str):
+        """
+        Register all endpoints with the central registry.
+
+        :param app: Flask application instance
+        :param registry_url: URL of the registry service
+        :param node_address: Address of the current node
+        :return: None
+        """
+        endpoints = EndpointManager.list_endpoints(app)
+        registration_data = {
+            "node_address": node_address,
+            "endpoints": endpoints
+        }
+        response = requests.post(f"{registry_url}/register", json=registration_data)
+        if response.status_code == 200:
+            print("Successfully registered endpoints")
+        else:
+            print("Failed to register endpoints")
+
+
+    def __init__(self, coin, wallet, transactions, verifier):
+        self.coin = coin
+        self.wallet = wallet
+        self.transactions = transactions
+        self.verifier = verifier
+
+        self.chain = []
+        self.block_hashes = set()
+        self.lock = threading.Lock()
+        logging.basicConfig(level=logging.DEBUG)
+        
+        self.validators = []
+        
+        mining_thread = threading.Thread(target=self.mine_new_block_periodically)
+        mining_thread.daemon = True
+        mining_thread.start()
+
+    @staticmethod
+    def serialize_and_create_single_hash(cls):
+        if not isinstance(cls, type):
+            raise TypeError(f"Expected class type, got {type(cls)}")
+
+        try:
+            class_dict = {
+                'attributes': {key: value for key, value in cls.__dict__.items() if not callable(value) and not key.startswith('__')},
+                'methods': {
+                    key: (value.__func__.__code__.co_code if isinstance(value, staticmethod) else value.__code__.co_code)
+                    for key, value in cls.__dict__.items() if callable(value)
+                }
+            }
+            class_serialized = json.dumps(class_dict, sort_keys=True, default=str)
+            logging.debug(f"Serialized class {cls.__name__}: {class_serialized}")
+            class_hash = hashlib.sha256(class_serialized.encode()).hexdigest()
+            return class_hash
+        except Exception as e:
+            logging.error(f"Error serializing class {cls.__name__}: {e}")
+            raise
+
+    @staticmethod
+    def verify_class_hashes():
+        """
+        This function retrieves the stored hashes of classes from the public API and compares them
+        with the hashes of the current local classes to ensure integrity.
+        """
+        try:
+            response = requests.get(HASH_API_URL)
+            if response.status_code != 200:
+                raise ValueError("Failed to fetch class hashes from public API.")
+
+            stored_hashes = response.json()
+        except Exception as e:
+            logging.error(f"Error fetching class hashes from public API: {e}")
+            raise
+
+        classes_to_verify = {
+            'coin': OMC,
+            'quantum_utils': QuantumUtils,
+            'transactions': Transactions,
+            'permission_manager': PermissionMngr,
+            'precursor_coin': pOMC,
+            'verifier': Verifier,
+            'crypto_utils': CUtils,
+            'fee_calculator': DynamicFeeCalculator,
+            'ledger': Ledger,
+            'treasury': OMCTreasury,
+            'endpoint_manager': EndpointManager
+        }
+
+        for class_name, cls in classes_to_verify.items():
+            stored_hash = stored_hashes.get(class_name)
+            if not stored_hash:
+                logging.error(f"Stored hash for class {class_name} not found in the public API response.")
+                raise ValueError(f"Stored hash for class {class_name} not found.")
+
+            local_hash = Ledger.serialize_and_create_single_hash(cls)
+            if stored_hash != local_hash:
+                logging.error(f"Hash mismatch for class {class_name}. Possible tampering detected.")
+                raise ValueError(f"Hash mismatch for class {class_name}. Possible tampering detected.")
+
+        logging.info("All class hashes verified successfully. No tampering detected.")
+        return True
+
+    def initialize_node(self):
+        service_prefix = "node"
+        services = self.discover_services(service_prefix)
+        if services:
+            self.ping_services(services, "check_nodes", node.url)
+
+        node.steward = os.getenv('STEWARD_ADDRESS')
+        if not node.steward:
+            raise ValueError("Steward address not provided. Set the STEWARD_ADDRESS environment variable.")
+
+        self.update_node_state(node)
+        self.check_chain_length_and_sync(services)
+        self.update_validators()
+        self.broadcast_node_data(node)
+
+    def discover_services(self, prefix):
+        discovered_services = []
+        max_range = 10
+
+        for i in range(1, max_range):
+            service_name = f"{prefix}{i}.omne"
+            try:
+                service_address = socket.gethostbyname(service_name)
+
+                if service_address != node.url:
+                    discovered_services.append(service_name)
+                    logging.debug(f"Discovered service: {service_name}")
+
+            except socket.gaierror:
+                continue
+
+        if not discovered_services:
+            logging.warning("No services were discovered.")
+
+        return discovered_services
+
+    def ping_services(self, services, endpoint, current_node_url):
+        headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/{endpoint}"
+
+            if service_base_url == current_node_url:
+                logging.debug(f"Skipping self ping: {service_base_url}")
+                continue
+
+            logging.debug(f"Attempting to ping {service_url}")
+            try:
+                response = requests.get(service_url, headers=headers)
+                if response.status_code == 200:
+                    logging.debug(f"Successfully pinged {service_url}")
+                    received_nodes = response.json().get('nodes', [])
+                    for received_node in received_nodes:
+                        if not any(node['address'] == received_node['address'] for node in self.verifier.nodes):
+                            verifier.nodes.append(received_node)
+                            verifier.nodes.append(received_node)
+                            self.validators.append(received_node['address'])
+                            logging.debug(f"Added new node: {received_node['address']}")
+                else:
+                    logging.debug(f"Failed to ping {service_url}, status code: {response.status_code}")
+
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error pinging {service_url}: {e}")
+
+    def post_data_to_services(self, services, endpoint, data):
+        headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/{endpoint}"
+
+            if service_base_url == node.url:
+                logging.debug(f"Skipping self post: {service_url}")
+                continue
+
+            logging.debug(f"Attempting to post data to {service_url}")
+            try:
+                response = requests.post(service_url, json=data, headers=headers)
+                if response.status_code == 200:
+                    logging.debug(f"Successfully posted data to {service_url}")
+                else:
+                    logging.debug(f"Failed to post data to {service_url}, status code: {response.status_code}")
+
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error posting data to {service_url}: {e}")
+
+    def broadcast_self_info(self):
+        if not node or not node.address or not node.url:
+            logging.error("Node information is incomplete or incorrect. Cannot broadcast.")
+            return
+
+        node_info = node.to_dict()
+        logging.info(f"Broadcasting self node information: {node_info}")
+
+        services = self.discover_services("node")
+        if not services:
+            logging.warning("No other services discovered for broadcasting. Broadcast aborted.")
+            return
+
+        services = [service for service in services if service != node.url]
+        if not services:
+            logging.warning("No external services discovered for broadcasting. Broadcast aborted.")
+            return
+
+        self.post_data_to_services(services, "receive_node_info", node_info)
+        logging.info("Successfully broadcasted self node information to other services.")
+
+    def update_validators(self):
+        services = self.discover_services("node")
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/node_info"
+
+            if service_base_url == node.url:
+                continue
+
+            try:
+                response = requests.get(service_url)
+                if response.status_code == 200:
+                    node_data = response.json()
+                    if node_data['address'] not in self.validators:
+                        self.validators.append(node_data['address'])
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Failed to retrieve node information from {service}: {e}")
+
+    def sync_with_other_nodes(self, services):
+        my_chain_length = len(self.chain)
+        synchronized_chain = None
+        authoritative_node_url = None
+
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/get_chain"
+
+            if service_base_url == node.url:
+                continue
+
+            try:
+                response = requests.get(service_url)
+                if response.status_code == 200:
+                    other_chain = response.json()["chain"]
+                    if len(other_chain) > my_chain_length:
+                        my_chain_length = len(other_chain)
+                        synchronized_chain = other_chain
+                        authoritative_node_url = service_base_url
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error while trying to sync with {service_url}: {e}")
+
+        if synchronized_chain:
+            self.chain = synchronized_chain
+
+        return authoritative_node_url, synchronized_chain
+
+    def broadcast_node_data(self, node):
+        headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+        node_data_complete = {
+            'address': node.address,
+            'public_key': node.public_key,
+            'url': node.url,
+            'stake_weight': node.stake_weight,
+            'version': node.version,
+            'steward': node.steward
+        }
+
+        services = self.discover_services("node")
+
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/receive_node_data"
+
+            if service_base_url == node.url:
+                continue
+
+            logging.debug(f"Broadcasting node data to {service_url}")
+            try:
+                response = requests.post(service_url, json=node_data_complete, headers=headers)
+                if response.status_code == 201:
+                    logging.debug(f"Successfully broadcasted new node data to {service_url}")
+                elif response.status_code == 200:
+                    logging.debug(f"Node data already exists on {service_url}")
+                else:
+                    logging.warning(f"Failed to broadcast node data to {service_url}, status code: {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error broadcasting node data to {service_url}: {e}")
+                
+    def update_accounts(self, address, balance):
+        new_account = {
+            'address': address,
+            'balance': balance
+        }
+
+        service_prefix = "node"
+        services = self.discover_services(service_prefix)
+
+        filtered_services = [s for s in services if f"http://{s}:3400" != node.url]
+        self.post_data_to_services(filtered_services, "propagate_account", new_account)
+
+    def update_node_state(self, new_node):
+        if new_node not in self.verifier.nodes:
+            verifier.nodes.append(new_node)
+            self.validators.append(new_node.address)
+            logging.info(f"Node {new_node.address} added to local state.")
+
+    def mine_new_block_periodically(self, interval=9):
+        while True:
+            self.check_for_mining_opportunity()
+            time.sleep(interval * 60)
+
+    def check_for_mining_opportunity(self):
+        num_transactions = len(transactions.transactions)
+        if num_transactions >= 1:
+            self.check_pending_transactions()
+        elif 4 <= num_transactions < 15 and self.is_time_to_mine():
+            self.check_pending_transactions()
+
+    def is_time_to_mine(self):
+        latest_block = self.chain[-1]
+        block_timestamp = datetime.strptime(latest_block['timestamp'], "%Y-%m-%d %H:%M:%S.%f%z")
+        current_timestamp = datetime.now(timezone.utc)
+        
+        mining_interval = 9 * 60  # Fixed interval of 9 minutes
+        return (current_timestamp - block_timestamp).total_seconds() >= mining_interval
+
+    def create_new_wallet(self):
+        mnemonic = crypto_utils.generate_mnemonic()
+        account = self.wallet.account_manager.generate_account_from_mnemonic(mnemonic)
+        
+        # Add the new address with a balance of zero to the self.balance dictionary
+        with coin.balance_lock:
+            coin.balance[account['address']] = 0.0
+
+        wallet_creation_transaction = {
+            'address': account['address'],
+            'balance': 0.0,
+            'withdrawals': 0,
+            'type': 'c'
+        }
+
+        cleaned_transaction = {
+            'address': wallet_creation_transaction['address'],
+            'balance': wallet_creation_transaction['balance'],
+            'pub_key': account['pub_key'],
+            'sub_type': 'c',
+            'type': wallet_creation_transaction['type'],
+            'withdrawals': wallet_creation_transaction['withdrawals']
+        }
+
+        initial_balance = 0.0
+
+        account_dict = {
+            'address': wallet_creation_transaction['address'],
+            'balance': initial_balance,
+        }
+
+        sendable_transaction = {
+            'mnemonic': mnemonic,
+            'private_key': base64.b64encode(account['private_key']).decode('utf-8'),
+            'pub_key': account['pub_key'],
+            'address': account['address'],
+        }
+
+        return sendable_transaction
+
+    def create_new_wallet_from_seed(self, seed):
+        account = self.wallet.account_manager.generate_account_from_mnemonic(seed)
+
+        wallet_creation_transaction = {
+            'address': account['address'],
+            'balance': 0.0,
+            'withdrawals': 0,
+            'type': 'c'
+        }
+
+        cleaned_transaction = {
+            'address': wallet_creation_transaction['address'],
+            'balance': wallet_creation_transaction['balance'],
+            'pub_key': account['pub_key'],
+            'type': wallet_creation_transaction['type'],
+            'withdrawals': wallet_creation_transaction['withdrawals']
+        }
+
+        sendable_transaction = {
+            'mnemonic': account['mnemonic'],
+            'private_key': base64.b64encode(account['private_key']).decode('utf-8'),
+            'pub_key': account['pub_key'],
+            'address': account['address'],
+        }
+
+        private_key_bytes = base64.b64decode(sendable_transaction['private_key'])
+        signature = crypto_utils.sign_transaction(private_key_bytes, wallet_creation_transaction)
+
+        cleaned_transaction['signature'] = signature
+
+        self.transactions.transactions.append(cleaned_transaction)
+        self.update_accounts(wallet_creation_transaction['address'], wallet_creation_transaction['balance'])
+
+        return sendable_transaction
+
+    def get_chain_length(self):
+        return len(self.chain) if hasattr(self, "blockchain") else 0
+
+    def check_chain_length_and_sync(self, services):
+        service_prefix = "node"
+        services = self.discover_services(service_prefix)
+
+        authoritative_node_url, synchronized_chain = self.sync_with_other_nodes(services)
+
+        self.sync_account_list_data(authoritative_node_url, account_manager, coin, staked_coin)
+        self.sync_treasury_data(authoritative_node_url)
+
+        self.ping_services(services, "check_nodes", node.url)
+
+        if synchronized_chain is not None:
+            return {
+                "chain": synchronized_chain,
+                "message": "Chain synchronized successfully"
+            }
+        else:
+            return {
+                "chain": self.chain,
+                "message": "Chain synchronization failed"
+            }
+
+    def sync_account_list_data(self, authoritative_node_url, account_manager, coin, staked_coin):
+        if not authoritative_node_url:
+            logging.error("No authoritative node URL provided for account list data synchronization.")
+            return
+
+        service_url = f"{authoritative_node_url}/retrieve_accounts"
+
+        try:
+            response = requests.get(service_url)
+            if response.status_code == 200:
+                data = response.json()
+
+                main_accounts = data.get('data', [])
+                for new_acc in main_accounts:
+                    if 'address' in new_acc and 'balance' in new_acc:
+                        account = next((acc for acc in account_manager.accounts if acc['address'] == new_acc['address']), None)
+                        if account:
+                            account['balance'] = new_acc['balance']
+                            coin.balance[new_acc['address']] = new_acc['balance']
+                            logging.info(f"Updated main account {new_acc['address']} for {coin.name}.")
+                        else:
+                            account_manager.accounts.append(new_acc)
+                            coin.balance[new_acc['address']] = new_acc['balance']
+                            logging.info(f"Added new main account {new_acc['address']} for {coin.name}.")
+
+                precursor_accounts = data.get('precursor_accounts', [])
+                for new_acc in precursor_accounts:
+                    if 'address' in new_acc and 'balance' in new_acc:
+                        account = next((acc for acc in account_manager.precursor_accounts if acc['address'] == new_acc['address']), None)
+                        if account:
+                            account['balance'] = new_acc['balance']
+                            coin.balance[new_acc['address']] = new_acc['balance']
+                            logging.info(f"Updated precursor account {new_acc['address']} for {coin.name}.")
+                        else:
+                            account_manager.precursor_accounts.append(new_acc)
+                            coin.balance[new_acc['address']] = new_acc['balance']
+                            logging.info(f"Added new precursor account {new_acc['address']} for {coin.name}.")
+
+                staking_accounts = data.get('staking_accounts', [])
+                for new_acc in staking_accounts:
+                    if 'address' in new_acc and 'min_term' in new_acc:
+                        account = next((acc for acc in staking_manager.staking_agreements if acc['address'] == new_acc['address']), None)
+                        if account:
+                            account['amount'] = new_acc['amount']
+                            account['withdrawals'] = new_acc['withdrawals']
+                            staked_coin.balance[new_acc['address']] = new_acc['amount']
+                            logging.info(f"Updated staking account {new_acc['address']} for {staked_coin.name}.")
+                        else:
+                            staked_coin.accounts.append(new_acc)
+                            staking_manager.staking_agreements.append(new_acc)
+                            staked_coin.balance[new_acc['address']] = new_acc['amount']
+                            logging.info(f"Added new staking account {new_acc['address']} for {staked_coin.name}.")
+
+                self.validators = data.get('validators', [])
+                if node.address not in self.validators:
+                    self.validators.append(node.address)
+
+                notification_data = {"message": "Data updated from authoritative node"}
+                self.post_data_to_services(self.discover_services("node"), "notify_data_update", notification_data)
+
+                logging.warning(f"Synchronized account list data with the authoritative node: {authoritative_node_url}")
+            else:
+                logging.error(f"Failed to retrieve account data from {service_url}, status code: {response.status_code}")
+        except requests.RequestException as e:
+            logging.error(f"Error retrieving account data from {service_url}: {e}")
+    
+    def sync_treasury_data(self, authoritative_node_url):
+        if not authoritative_node_url:
+            logging.error("No authoritative node URL provided for treasury data synchronization.")
+            return False
+
+        service_url = f"{authoritative_node_url}/retrieve_treasury_data"
+
+        try:
+            response = requests.get(service_url)
+            if response.status_code == 200:
+                response_data = response.json()
+                if 'treasury_address' in response_data:
+                    treasury.update_treasury_data(response_data['treasury_address'])
+                    logging.warning("Synchronized treasury data with the authoritative node: %s", authoritative_node_url)
+                    return True
+                else:
+                    logging.error(f"No treasury account data found in the response from {service_url}")
+                    return False
+            else:
+                logging.error(f"Failed to retrieve treasury data from {service_url}, status code: {response.status_code}")
+                return False
+        except requests.RequestException as e:
+            logging.error(f"Error retrieving treasury data from {service_url}: {e}")
+            return False
+    
+    def add_account(self, account_data):
+        address = account_data.get('address')
+        balance_float = account_data.get('balance_float', 0)
+        new_account = {}
+        new_account['address'] = address
+        new_account['balance'] = balance_float
+
+        account_manager.accounts.append(new_account)
+        coin.balance[address] = balance_float
+
+        logging.info(f"Added/Updated account: {address} with balance {balance_float}")
+
+    def add_staking_account(self, data):
+        account_manager.staking_accounts.append(data)
+        staked_coin.accounts.append(data)
+        staking_manager.staking_accounts.append(data)
+
+    def get_init_date(self):
+        return coin.init_date
+
+    def validate_chain(self, chain):
+        previous_block = chain[0]
+        for block in chain[1:]:
+            if block['previous_hash'] != previous_block['hash']:
+                return False
+
+            block_data = block.copy()
+            block_data.pop('hash')
+            calculated_hash = self.calculate_block_hash(block_data)
+
+            if block['hash'] != calculated_hash:
+                return False
+
+            if not self.validate_stake(block):
+                return False
+
+            previous_block = block
+
+        return True
+
+    def add_block(self, block):
+        logging.info(f"Attempting to add block with index {block['index']}")
+        if self.validate_received_block(block):
+            with self.lock:
+                if block['index'] == len(self.chain) + 1 and \
+                   block['previous_hash'] == self.chain[-1]['hash']:
+                    self.chain.append(block)
+                    self.block_hashes.add(block['hash'])
+                    logging.info(f"Block with index {block['index']} successfully added to the chain.")
+                    self.broadcast_block(block)
+                    return True
+                else:
+                    logging.warning(f"Block with index {block['index']} failed to match chain continuity.")
+        else:
+            logging.warning(f"Block with index {block['index']} failed validation.")
+        return False
+    
     def broadcast_block(self, new_block):
         block_data = json.dumps(new_block)
 
         service_prefix = "node"
-        services = self.node.ledger.discover_services(service_prefix)
+        services = self.discover_services(service_prefix)
 
-        self.node.ledger.post_data_to_services(services, "blocks/receive_block", block_data)
+        self.post_data_to_services(services, "blocks/receive_block", block_data)
+        
+    def validate_foreign_tx(self, address, hash, pub_key, tx, signature):
+        logging.debug(f"Validating tx from {address}")
+
+        tx_hash = quantum_utils.quantum_resistant_hash(json.dumps(tx, sort_keys=True))
+        if tx_hash != hash:
+            logging.error(f"Hash mismatch for transaction with hash: {hash}")
+            return None
+
+        if not CUtils.verify_transaction(pub_key, tx, signature):
+            logging.error(f"Invalid signature in foreign transaction with hash: {hash} from address: {address}")
+            return None
+
+        return True
+
+    def vote_on_local_tx(self, address, hash, pub_key, tx, signature):
+        valid_votes = []
+        services = ledger.discover_services("node")
+
+        if len(services) == 1 and services[0] == node.url:
+            logging.info("Only one validator in the network, bypassing the voting process.")
+            valid_votes.append(node.url)
+
+        filtered_services = [s for s in services if f"http://{s}:3400" != node.url]
+        for service in filtered_services:
+            service_url = f"http://{service}:3400/vote_on_tx"
+
+            try:
+                data = {
+                    'address': address,
+                    'hash': hash,
+                    'pub_key': pub_key,
+                    'new_tx': tx,
+                    'signature': signature
+                }
+                response = requests.post(service_url, json=data)
+                if response.status_code == 200 and response.json().get('message') == 'Tx is valid':
+                    valid_votes.append(service)
+                    logging.info(f"Validator {service} approved the tx.")
+                else:
+                    logging.info(f"Validator {service} did not approve the tx.")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error voting on block with {service}: {e}")
+
+        return valid_votes
+
+    def reach_tx_consensus(self, address, hash, pub_key, tx, signature):
+        if len(self.validators) == 1:
+            logging.info("Automatically reaching consensus with single validator")
+            return True
+
+        consensus_reached = self.vote_on_local_tx(address, hash, pub_key, tx, signature)
+
+        if consensus_reached:
+            logging.info("Tx consensus reached")
+            return True
+        else:
+            logging.info("Tx consensus not reached")
+            return False
+
+    def receive_tx(self, address, hash, pub_key, tx, signature):
+        try:
+            if not self.validate_foreign_tx(address, hash, pub_key, tx, signature):
+                logging.error(f"Received transaction, with hash {hash} from wallet {address}, did not pass verification")
+                return False
+
+            return True
+        except Exception as e:
+            logging.error(f"Error processing received transaction: {str(e)}")
+            return False
+
+    def receive_block(self, block):
+        try:
+            services = ledger.discover_services("node")
+            authoritative_node_url, _ = ledger.sync_with_other_nodes(services)
+
+            if authoritative_node_url:
+                ledger.sync_account_list_data(authoritative_node_url, account_manager, coin, staked_coin)
+                ledger.sync_treasury_data(authoritative_node_url)
+
+            return True
+        except Exception as e:
+            logging.error(f"Error processing received block: {str(e)}")
+            return False
+
+    def broadcast_tx(self, address, hash, pub_key, new_tx, signature):
+        data = {
+            'address': address,
+            'hash': hash,
+            'pub_key': pub_key,
+            'new_tx': new_tx,
+            'signature': signature
+        }
+
+        services = ledger.discover_services("node")
+
+        ledger.post_data_to_services(services, "transaction/receive_tx", data)
+
+        return True
+    
+    def randomly_select_validator(self):
+        if not self.validators:
+            logging.warning("No validators available.")
+            return None
+
+        try:
+            if len(self.validators) == 1:
+                validator_address = self.validators[0]
+                logging.info(f"Only one validator available. Selected validator address: {validator_address}")
+                return validator_address
+
+            max_value = len(self.validators) - 1
+            random_bytes = QuantumUtils.quantum_random_bytes((max_value.bit_length() + 7) // 8)
+            random_int = int.from_bytes(random_bytes, 'big') % (max_value + 1)
+            validator_address = self.validators[random_int]
+            logging.info(f"Randomly selected validator address: {validator_address}")
+            return validator_address
+        except Exception as e:
+            logging.error(f"Error generating random index: {e}")
+            return None
+
+    def trigger_sync_on_all_nodes(self):
+        services = ledger.discover_services("node")
+
+        data = {}
+
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+
+            if service_base_url == node.url:
+                logging.debug(f"Skipping self sync trigger: {service_base_url}")
+                continue
+
+            service_url = f"{service_base_url}/trigger_sync"
+            logging.debug(f"Attempting to trigger sync on {service_url}")
+            try:
+                response = requests.post(service_url, json=data)
+                if response.status_code == 200:
+                    logging.debug(f"Successfully triggered sync on {service_url}")
+                else:
+                    logging.debug(f"Failed to trigger sync on {service_url}, status code: {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error triggering sync on {service_url}: {e}")
+
+    def validate_received_block(self, block):
+        logging.debug(f"Validating received block with index {block['index']}")
+        if not self.validate_block_structure(block):
+            logging.error("Block structure validation failed.")
+            return False
+
+        if not self.validate_block(block):
+            logging.error("Block content validation failed.")
+            return False
+
+        if block['index'] != len(self.chain) + 1:
+            logging.error(f"Block index {block['index']} does not follow the current chain length.")
+            return False
+
+        return True
+
+    def validate_block_structure(self, block):
+        logging.debug(f"Checking block structure for block with index {block['index']}")
+        required_fields = [
+            'index', 'previous_hash', 'timestamp', 'transactions',
+            'merkle_root', 'stake_threshold', 'hash', 'miner', 'miner_share',
+            'validator', 'validator_share', 'fee'
+        ]
+
+        missing_fields = [field for field in required_fields if field not in block]
+        if missing_fields:
+            logging.error(f"Block missing required fields: {missing_fields}")
+            return False
+
+        field_type_issues = False
+        for field in required_fields:
+            if field in block:
+                expected_type = (int if field in ['index', 'timestamp'] else
+                                 str if field in ['previous_hash', 'hash', 'miner', 'validator', 'merkle_root'] else
+                                 list if field == 'transactions' else
+                                 (int, float) if field in ['stake_threshold', 'fee', 'miner_share', 'validator_share'] else
+                                 None)
+                actual_type = type(block[field])
+                if not isinstance(block[field], expected_type):
+                    logging.error(f"Field '{field}' type mismatch: expected {expected_type}, got {actual_type}")
+                    field_type_issues = True
+            else:
+                logging.error(f"Field '{field}' is missing from the block.")
+                field_type_issues = True
+
+        if field_type_issues:
+            logging.error("One or more block field types are incorrect.")
+            return False
+
+        logging.debug("Block structure validated successfully.")
+        return True
+    
+    def reach_consensus(self, proposed_block):
+        if len(self.validators) == 1:
+            logging.info("Automatically reaching consensus with single validator")
+            return True
+
+        consensus_reached = self.vote_on_local_block(proposed_block)
+
+        if consensus_reached:
+            logging.info("Consensus reached")
+            return True
+        else:
+            logging.info("Consensus not reached")
+            return False
+
+    def vote_on_local_block(self, block):
+        valid_votes = []
+        services = self.discover_services("node")
+
+        if len(services) == 1 and services[0] == node.url:
+            logging.info("Only one validator in the network, bypassing the voting process.")
+            valid_votes.append(node.url)
+
+        filtered_services = [s for s in services if f"http://{s}:3400" != node.url]
+        for service in filtered_services:
+            service_url = f"http://{service}:3400/vote_on_block"
+
+            try:
+                response = requests.post(service_url, json=block)
+                if response.status_code == 200 and response.json().get('message') == 'Block is valid':
+                    valid_votes.append(service)
+                    logging.info(f"Validator {service} approved the block.")
+                else:
+                    logging.info(f"Validator {service} did not approve the block.")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error voting on block with {service}: {e}")
+
+        return valid_votes
+
+    def validate_block(self, block):
+        logging.debug(f"Validating block with index {block['index']}")
+        if block['validator'] not in self.validators:
+            logging.error("Block validator is not recognized.")
+            return False
+
+        if not self.proof_of_stake(block):
+            return False
+
+        unique_addresses = set()
+        double_spent_addresses = set()
+        for transaction in block['transactions']:
+            sender_address = transaction.get('address')
+            if sender_address in unique_addresses:
+                double_spent_addresses.add(sender_address)
+            unique_addresses.add(sender_address)
+
+        if double_spent_addresses:
+            logging.error(f"Double spending detected for addresses: {', '.join(double_spent_addresses)}")
+            raise DoubleSpendingError("Double spending detected for addresses: " + ', '.join(double_spent_addresses))
+
+        block_string = str(block['index']) + str(block['timestamp']) + str(block['previous_hash']) + str(
+            block['transactions']) + str(block['fee']) + str(block['validator']) + str(block['validator_share'])
+
+        generated_hash = hashlib.sha256(block_string.encode()).hexdigest()
+        if block['hash'] != generated_hash:
+            logging.error("Block hash does not match the generated hash.")
+            return False
+
+        if not self.reach_consensus(block):
+            logging.error("Failed to reach consensus.")
+            return False
+
+        logging.info(f"Block with index {block['index']} passed all validations.")
+        return True
+
+    def validate_foreign_block(self, block):
+        logging.debug(f"Validating block with index {block['index']}")
+        if block['validator'] not in self.validators:
+            logging.error("Block validator is not recognized.")
+            return False
+
+        if not self.proof_of_stake(block):
+            return False
+
+        unique_addresses = set()
+        double_spent_addresses = set()
+        for transaction in block['transactions']:
+            sender_address = transaction.get('address')
+            if sender_address in unique_addresses:
+                double_spent_addresses.add(sender_address)
+            unique_addresses.add(sender_address)
+
+        if double_spent_addresses:
+            logging.error(f"Double spending detected for addresses: {', '.join(double_spent_addresses)}")
+            raise DoubleSpendingError("Double spending detected for addresses: " + ', '.join(double_spent_addresses))
+
+        block_string = str(block['index']) + str(block['timestamp']) + str(block['previous_hash']) + str(
+            block['transactions']) + str(block['fee']) + str(block['validator']) + str(block['validator_share'])
+
+        generated_hash = hashlib.sha256(block_string.encode()).hexdigest()
+        if block['hash'] != generated_hash:
+            logging.error("Block hash does not match the generated hash.")
+            return False
+
+        return True
+
+    def generate_block_hash(self, block):
+        transactions_string = json.dumps(block['transactions'], sort_keys=True)
+
+        block_contents = (
+            str(block['index']) +
+            str(block['timestamp']) +
+            str(block['previous_hash']) +
+            transactions_string +
+            str(block['fee']) +
+            str(block['miner']) +
+            str(block['miner_share']) +
+            str(block['validator']) +
+            str(block['validator_share'])
+        )
+
+        block_hash = hashlib.sha256(block_contents.encode()).hexdigest()
+        return block_hash
+    
+    def proof_of_stake(self, block):
+        logging.info("Starting proof of stake validation.")
+
+        total_stake_weight = sum(node['stake_weight'] if isinstance(node, dict) else node.stake_weight for node in self.verifier.nodes)
+        random_number = random.uniform(0, total_stake_weight)
+        cumulative_stake_weight = 0
+
+        logging.info(f"Total stake weight: {total_stake_weight}, Random number for validator selection: {random_number}")
+
+        for current_node in self.verifier.nodes:
+            node_stake_weight = current_node['stake_weight'] if isinstance(current_node, dict) else current_node.stake_weight
+            cumulative_stake_weight += node_stake_weight
+
+            if cumulative_stake_weight > random_number:
+                selected_validator_address = current_node['address'] if isinstance(current_node, dict) else current_node.address
+                logging.info(f"Selected validator address: {selected_validator_address}, Stake weight: {node_stake_weight}")
+
+                if selected_validator_address == block['validator']:
+                    logging.info(f"Validator {selected_validator_address} matches the block's validator.")
+                    if node_stake_weight >= block['stake_threshold']:
+                        logging.info(f"Validator {selected_validator_address} meets the stake threshold.")
+                        return node_stake_weight
+                    else:
+                        logging.error(f"Validator {selected_validator_address} does not meet the stake threshold.")
+                        return 0
+
+        logging.error("No suitable validator found or the selected validator does not meet the stake threshold.")
+        return 0
+
+    def add_coin_transaction(self, address: str, amount: int, converted_amount: Union[int, float], fee: Union[int, float], hash: str, pub_key: str, signature: str, sub_type: str, type: str) -> Union[bool, str]:
+
+        cleaned_transaction = {
+            'address': address,
+            'amount': amount,
+            'converted_amount': converted_amount,
+            'fee': fee,
+            'hash': hash,
+            'pub_key': pub_key,
+            'signature': signature,
+            'sub_type': sub_type,
+            'type': type
+        }
+
+        if cleaned_transaction['signature']:
+            return cleaned_transaction
+        
+    def select_miner(self) -> dict:
+        accounts = staking_manager.staking_agreements
+
+        # If no accounts are available, return None
+        if not accounts:
+            logging.warning("No staking accounts available for miner selection.")
+            return None
+
+        # Calculate the number of withdrawals for each account
+        for account in accounts:
+            account['withdrawals'] = sum(1 for block in self.chain for transaction in block['transactions']
+                                        if 'address' in transaction and transaction.get('address') == account['address'])
+
+        # Select the miner based on weighted selection
+        miner = self.weighted_selection(accounts)
+        return miner
+
+    def weighted_selection(self, accounts: List[dict]) -> dict:
+        # Calculate weights based on the number of withdrawals for each account
+        weights = [1 / (acc['withdrawals'] + 1) for acc in accounts]
+        total_weight = sum(weights)
+
+        # Normalize the weights to ensure their sum is 1
+        normalized_weights = [weight / total_weight for weight in weights]
+
+        # Select an account using the normalized weights
+        chosen_account = random.choices(
+            accounts, weights=normalized_weights, k=1)[0]
+        return chosen_account
+
+    def calculate_fee_distribution(self, total_fee):
+        fee_distribution = {}
+
+        validator_percentage = 0.45
+        miner_percentage = 0.315
+        treasury_percentage = 0.235  # Updated to include the burn percentage
+
+        fee_distribution['validator_share'] = total_fee * validator_percentage
+        fee_distribution['miner_share'] = total_fee * miner_percentage
+        fee_distribution['treasury_share'] = total_fee * treasury_percentage
+
+        return fee_distribution
+    
+    def select_validator(self, block):
+        selected_validator = self.verifier.select_validator(block)
+        return selected_validator if selected_validator else None
+
+    def validate_selected_validator(self, selected_validator, block):
+        if selected_validator.malicious or selected_validator not in verifier.nodes:
+            return False
+
+        if selected_validator.address == block['validator'] and \
+                selected_validator.stake_weight >= block['stake_threshold']:
+            return True
+
+        return False
+
+    def add_malicious_validator(self, validator_address):
+        for node in verifier.nodes:
+            if node.address == validator_address:
+                node.malicious = True
+                break
+
+    def create_new_block(self, transactions):
+        latest_block = self.chain[-1]
+        block_index = latest_block['index'] + 1
+        timestamp = int(datetime.now(timezone.utc).timestamp())
+        previous_hash = latest_block['hash']
+        stake_threshold = node.stake_weight
+
+        processed_transactions, total_fee = self.process_transactions(transactions)
+        block_fee = self.coin.mint_for_block_fee(total_fee)
+        fee_distribution = self.calculate_fee_distribution(block_fee)
+        miner = self.select_miner()
+
+        if miner is None:
+            logging.error("Failed to select a miner. Aborting block creation.")
+            return
+
+        miner_address = miner['address']
+
+        block = {
+            'index': block_index,
+            'timestamp': timestamp,
+            'previous_hash': previous_hash,
+            'transactions': processed_transactions,
+            'stake_threshold': stake_threshold,
+            'fee': block_fee
+        }
+
+        validator_node = self.select_validator(block)
+        if validator_node:
+            validator_address = validator_node['address'] if isinstance(validator_node, dict) else getattr(validator_node, 'address', node.address)
+        else:
+            validator_address = node.address
+
+        for transaction in transactions:
+            merkle_tree.add_transaction(str(transaction))
+
+        merkle_tree.create_tree()
+        merkle_root = merkle_tree.get_merkle_root()
+
+        self.coin.credit(validator_address, fee_distribution['validator_share'])
+        self.coin.credit(miner_address, fee_distribution['miner_share'])
+        self.coin.credit(self.coin.treasury_address, fee_distribution['treasury_share'])
+
+        new_block = {
+            'index': block_index,
+            'timestamp': timestamp,
+            'previous_hash': previous_hash,
+            'transactions': processed_transactions,
+            'merkle_root': merkle_root,
+            'stake_threshold': stake_threshold,
+            'fee': block_fee,
+            'miner': miner_address,
+            'miner_share': fee_distribution['miner_share'],
+            'validator': validator_address,
+            'validator_share': fee_distribution['validator_share'],
+            'treasury_share': fee_distribution['treasury_share']
+        }
+
+        logging.info(f"constructed block: {new_block}")
+
+        block_string = str(new_block['index']) + str(new_block['timestamp']) + str(new_block['previous_hash']) + str(
+            new_block['transactions']) + str(new_block['fee']) + str(new_block['validator']) + str(new_block['validator_share'])
+
+        # Generate block hash
+        block_hash = hashlib.sha256(block_string.encode()).hexdigest()
+
+        new_block['hash'] = block_hash
+
+        if self.add_block(new_block):
+            self.transactions.cleaned_transactions = []
+            logging.info(f"Successfully mined new block: {new_block}")
+            return new_block
+        else:
+            logging.debug(f"Issue mining block: {new_block}")
+
+    def process_transactions(self, transactions):
+        processed_transactions = []
+        total_fee = 0.0
+
+        for transaction in transactions:
+            transaction_type = transaction.get('sub_type')
+
+            if transaction_type == 'r':
+                processed_transaction = self.handle_staking_transaction(transaction)
+            elif transaction_type == 'o':
+                processed_transaction = self.handle_unstaking_transaction(transaction)
+            elif transaction_type == 'k':
+                processed_transaction = self.handle_transfer_transaction(transaction)
+            elif transaction_type == 'w':
+                processed_transaction = self.handle_pomc_whitelist_transaction(transaction)
+            elif transaction_type in ['h', 'x', 'm', 'pr']:
+                processed_transaction = self.handle_fee_payment_transaction(transaction)
+            else:
+                processed_transaction = self.handle_default_transaction(transaction)
+
+            if processed_transaction:
+                processed_transactions.append(processed_transaction)
+                total_fee += processed_transaction.get('fee', 0.0)
+
+        return processed_transactions, total_fee
+
+    def handle_staking_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            sender_address = transaction['address']
+            staking_amount = transaction['amount']
+            min_term = transaction['min_term']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            transaction_data = {
+                'address': sender_address,
+                'amount': staking_amount,
+                'min_term': min_term,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            transaction_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            if not all([sender_address, staking_amount, min_term, pub_key, signature]):
+                logging.error("Missing fields in staking transaction")
+                return None
+
+            sender_balance_info = self.wallet.get_account_balance(sender_address)
+            if not sender_balance_info or sender_balance_info['balance_float'] < staking_amount + transaction_fee:
+                logging.error("Insufficient balance for staking")
+                return None
+
+            transaction_for_verification = {
+                'address': sender_address,
+                'amount': staking_amount,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'min_term': min_term,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            if not crypto_utils.verify_transaction(transaction['pub_key'], transaction_for_verification, transaction['signature']):
+                logging.error("Invalid signature in staking transaction")
+                return None
+
+            self.wallet.stake_coins(sender_address, staking_amount, min_term)
+
+            processed_transaction = {
+                'address': sender_address,
+                'amount': staking_amount,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'min_term': min_term,
+                'stake_threshold': 3,
+                'type': transaction['type'],
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed staking transaction for {sender_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing staking transaction: {e}")
+            return None
+
+    def handle_unstaking_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            sender_address = transaction['address']
+            contract_id = transaction['contract_id']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            transaction_data = {
+                'address': sender_address,
+                'contract_id': contract_id,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            transaction_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            if not all([sender_address, contract_id, pub_key, signature]):
+                logging.error("Missing fields in unstaking transaction")
+                return None
+
+            sender_balance_info = self.wallet.get_account_balance(sender_address)
+            if not sender_balance_info or sender_balance_info['balance_float'] < transaction_fee:
+                logging.error("Insufficient balance for unstaking")
+                return None
+
+            transaction_for_verification = {
+                'address': sender_address,
+                'contract_id': contract_id,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            if not crypto_utils.verify_transaction(transaction['pub_key'], transaction_for_verification, transaction['signature']):
+                logging.error("Invalid signature in unstaking transaction")
+                return None
+
+            self.wallet.unstake_coins(sender_address, contract_id)
+
+            processed_transaction = {
+                'address': sender_address,
+                'contract_id': contract_id,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'stake_threshold': 2,
+                'type': transaction['type'],
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed unstaking transaction for {sender_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing unstaking transaction: {e}")
+            return None
+
+    def handle_transfer_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            sender_address = transaction['sender']
+            recipient_address = transaction['recipient']
+            transfer_amount = transaction['amount']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            transaction_data = {
+                'sender': sender_address,
+                'recipient': recipient_address,
+                'amount': transfer_amount,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            transaction_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            if not all([sender_address, recipient_address, transfer_amount, pub_key, signature]):
+                logging.error("Missing fields in transfer transaction")
+                return None
+
+            sender_balance_info = self.wallet.get_account_balance(sender_address)
+            if not sender_balance_info or sender_balance_info['balance_float'] < transfer_amount + transaction_fee:
+                logging.error("Insufficient balance for transfer")
+                return None
+
+            transaction_for_verification = {
+                'sender': sender_address,
+                'recipient': recipient_address,
+                'amount': transfer_amount,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            if not crypto_utils.verify_transaction(transaction['pub_key'], transaction_for_verification, transaction['signature']):
+                logging.error("Invalid signature in transfer transaction")
+                return None
+
+            self.wallet.transfer(sender_address, recipient_address, transfer_amount)
+
+            processed_transaction = {
+                'sender': sender_address,
+                'recipient': recipient_address,
+                'amount': transfer_amount,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'stake_threshold': 2,
+                'type': transaction['type'],
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed transfer transaction from {sender_address} to {recipient_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing transfer transaction: {e}")
+            return None
+    
+    def handle_pomc_whitelist_transaction(self, transaction):
+        try:
+            
+            sender_address = transaction['sender']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            processed_transaction = {
+                'fee': transaction['fee'],
+                'hash': transaction['hash'],
+                'sender': transaction['sender'],
+                'sub_type': transaction['sub_type'],
+                'stake_threshold': 2,
+                'type': transaction['type'],
+                'when': transaction['when']
+            }
+
+            logging.info(f"Processed transfer transaction from {sender_address} to join pOMC whitelist")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing transfer transaction: {e}")
+            return None
+
+    def handle_fee_payment_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            payer_address = transaction['from']
+            fee_amount = transaction['fee']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            transaction_data = {
+                'from': payer_address,
+                'fee': fee_amount,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            calculated_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            if not all([payer_address, fee_amount, pub_key, signature]):
+                logging.error("Missing fields in fee payment transaction")
+                return None
+
+            payer_balance_info = self.wallet.get_account_balance(payer_address)
+            if not payer_balance_info or payer_balance_info['balance_float'] < fee_amount + calculated_fee:
+                logging.error("Insufficient balance for fee payment")
+                return None
+
+            transaction_for_verification = {
+                'from': payer_address,
+                'fee': calculated_fee,
+                'hash': transaction_hash,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            if not crypto_utils.verify_transaction(transaction['pub_key'], transaction_for_verification, transaction['signature']):
+                logging.error("Invalid signature in fee payment transaction")
+                return None
+
+            self.wallet.pay_fee(payer_address, fee_amount)
+
+            processed_transaction = {
+                'from': payer_address,
+                'fee': calculated_fee,
+                'hash': transaction_hash,
+                'stake_threshold': 2,
+                'type': transaction['type'],
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed fee payment transaction from {payer_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing fee payment transaction A1: {e}")
+            return None
+
+    def handle_default_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            payer_address = transaction['address']
+
+            transaction_data = {
+                'from': payer_address,
+                'type': 'e'
+            }
+
+            calculated_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            processed_transaction = {
+                'from': payer_address,
+                'fee': 0.0,
+                'hash': transaction_hash,
+                'stake_threshold': 1,
+                'type': 'e',
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed fee payment transaction from {payer_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing fee payment transaction A2: {e}")
+            return None
+
+    def clean_and_verify_transactions(self):
+        new_transactions = self.transactions.batch_pending_transactions()
+        cleaned_transactions = []
+
+        for transaction in new_transactions:
+            try:
+                if transaction['type'] == 'c' and transaction['sub_type'] == 'c':
+                    self.process_account_creation_transaction(transaction)
+                elif transaction['type'] == 'c' and transaction['sub_type'] == 'w':
+                    self.process_add_account_to_whitelist_transaction(transaction)
+                elif transaction['type'] == 'o':
+                    self.process_non_f_transaction(transaction)
+                elif transaction['type'] == 'e':
+                    self.process_f_transaction(transaction)
+            except Exception as e:
+                logging.error(f"Error processing transaction {transaction['type']}: {e}")
+
+        return cleaned_transactions
+    
+    def process_account_creation_transaction(self, transaction):
+        # Verify that the transaction is of the correct type
+        if transaction['type'] != 'c':
+            logging.error(f"Invalid transaction type for account creation: {transaction['type']}")
+            return
+
+        try:
+            # Extract necessary fields from the transaction
+            address = transaction['address']
+            balance = transaction['balance']
+            type = transaction['type']
+            timestamp = ['timestamp']
+            withdrawals = transaction['withdrawals']
+
+            # Validate the transaction data
+            if not all([address, type]):
+                logging.error("Incomplete account creation transaction data")
+                return
+
+            # Check if the address already exists in the blockchain wallet
+            # if any(acc['address'] == address for acc in account_manager.accounts):
+            #     logging.info(f"Account already exists: {address}")
+            #     return
+
+            # # Create and append the new account to the wallet
+            # new_account = {
+            #     'address': address,
+            #     'balance': balance,
+            #     'withdrawals': withdrawals
+            # }
+            # account_manager.accounts.append(new_account)
+
+            # Create a cleaned version of the transaction for the blockchain
+            cleaned_transaction = {
+                'address': address,
+                'hash': transaction.get('hash'),
+                'pub_key': transaction['pub_key'],
+                'signature': transaction['signature'],
+                'sub_type': 'c',
+                'type': transaction['type'],
+                'withdrawals': withdrawals
+            }
+
+            # Append the cleaned transaction to the list of processed transactions
+            self.transactions.cleaned_transactions.append(cleaned_transaction)
+            logging.info(f"Processed account creation transaction for {address}")
+
+        except Exception as e:
+            logging.error(f"Error processing account creation transaction A2: {e}")
+            
+    def process_add_account_to_whitelist_transaction(self, transaction):
+        # Verify that the transaction is of the correct type
+        if transaction['type'] != 'c':
+            logging.error(f"Invalid transaction type to add account to whitelist: {transaction['type']}")
+            return
+
+        try:
+            result = {
+                'fee': transaction['fee'],
+                'hash': transaction['hash'],
+                'pub_key': transaction['pub_key'],
+                'sender': transaction['sender'],
+                'signature': transaction['signature'],
+                'sub_type': transaction['sub_type'],
+                'type': transaction['type'],
+                'when': transaction['when']
+            }
+            # Extract necessary fields from the transaction
+            address = transaction['sender']
+            hash = transaction['hash']
+            type = transaction['type']
+
+            # Validate the transaction data
+            if not all([address, hash, type]):
+                logging.error("Incomplete account creation transaction data")
+                return
+
+            # Create a cleaned version of the transaction for the blockchain
+            cleaned_transaction = {
+                'fee': transaction['fee'],
+                'hash': transaction['hash'],
+                'pub_key': transaction['pub_key'],
+                'sender': transaction['sender'],
+                'signature': transaction['signature'],
+                'sub_type': transaction['sub_type'],
+                'type': transaction['type'],
+                'when': transaction['when']
+            }
+
+            # Append the cleaned transaction to the list of processed transactions
+            self.transactions.cleaned_transactions.append(cleaned_transaction)
+            logging.info(f"Processed join whitelist transaction for {address}")
+
+        except Exception as e:
+            logging.error(f"Error processing join whiteist transaction A2: {e}")
+
+    def process_f_transaction(self, transaction):
+        try:
+            transaction_type = transaction.get('type')
+            sender_address = transaction.get('address')
+            transaction_fee = transaction.get('fee', 0.0)
+
+            if not sender_address or transaction_fee is None:
+                logging.error("Invalid transaction format.")
+                return None
+
+            cleaned_transaction = None
+
+            if transaction_type == 'e':
+                sub_tx_type = transaction.get('sub_type')
+
+                if sub_tx_type == 'p':
+                    amount = transaction.get('amount')
+                    recipient_address = transaction.get('recipient')
+
+                    if crypto_utils.verify_transaction(sender_address, recipient_address, amount):
+                        self.wallet.transfer(sender_address, recipient_address, amount)
+
+                elif sub_tx_type == 'r':
+                    amount = transaction.get('amount')
+                    min_term = transaction.get('min_term')
+
+                    self.wallet.stake_coins(sender_address, amount, min_term)
+
+                elif sub_tx_type == 'z':
+                    contract_id = transaction.get('contract_id')
+
+                    self.wallet.unstake_coins(sender_address, contract_id)
+
+            if cleaned_transaction:
+                self.transactions.cleaned_transactions.append(cleaned_transaction)
+                logging.info(f"Processed transaction of type {transaction_type} for {sender_address}")
+                return cleaned_transaction
+            else:
+                logging.warning(f"Unhandled or failed transaction type/subtype: {transaction_type}/{sub_tx_type}")
+                return None
+
+        except Exception as e:
+            logging.error(f"Error processing account creation transaction A2: {e}")
+
+    def process_non_f_transaction(self, transaction):
+        try:
+            transaction_type = transaction.get('type')
+            sender_address = transaction.get('address')
+            transaction_fee = transaction.get('fee', 0.0)
+
+            if not sender_address or transaction_fee is None:
+                logging.error("Invalid transaction format.")
+                return None
+
+            cleaned_transaction = None
+
+            if transaction_type == 'o':
+                sub_tx_type = transaction.get('sub_type')
+
+                if sub_tx_type == 's':
+                    self.handle_post_transaction(transaction)
+
+                elif sub_tx_type == 'j':
+                    refined_transaction = self.handle_add_profile_transaction(transaction)
+                    if refined_transaction:
+                        cleaned_transaction = {
+                            'address': transaction['address'],
+                            'avi': transaction['avi'],
+                            'clubs': transaction['clubs'],
+                            'fee': transaction['fee'],
+                            'handle': transaction['handle'],
+                            'hash': transaction['hash'],
+                            'intro': transaction['intro'],
+                            'joined': transaction['joined'],
+                            'name': transaction['name'],
+                            'profile_id': transaction['profile_id'],
+                            'profile_type': transaction['profile_type'],
+                            'pt': transaction['pt'],
+                            'pt_id': transaction['pt_id'],
+                            'pub_key': transaction['pub_key'],
+                            'signature': transaction['signature'],
+                            'sub_type': transaction['sub_type'],
+                            'tags': transaction['tags'],
+                            'type': transaction['type'],
+                            'version': transaction['version']
+                        }
+
+            if cleaned_transaction:
+                transactions.cleaned_transactions.append(cleaned_transaction)
+                logging.info(f"Processed transaction of type {transaction_type} for {sender_address}")
+                return cleaned_transaction
+            else:
+                logging.warning(f"Unhandled or failed transaction type/subtype: {transaction_type}/{sub_tx_type}")
+                return None
+
+        except Exception as e:
+            logging.error(f"Error processing transaction: {e}")
+            return None
+
+    def start_mining(self):
+        self.create_new_block(self.transactions.cleaned_transactions)
+
+    def check_pending_transactions(self):
+        self.clean_and_verify_transactions()
+        self.start_mining()
+
+    def get_latest_block(self):
+        return self.chain[-1]
+
+    def main_loop(self):
+        while True:
+            self.start_mining()
+            self.consume_blocks()
+
+    def consume_blocks(self):
+        for message in self.consumer:
+            block_data = message.value.decode('utf-8')
+            block = json.loads(block_data)
+            self.receive_block(block)
+    def __init__(self, coin, wallet, transactions, verifier):
+        self.coin = coin
+        self.wallet = wallet
+        self.transactions = transactions
+        self.verifier = verifier
+
+        self.chain = []
+        self.block_hashes = set()
+        self.lock = threading.Lock()
+        logging.basicConfig(level=logging.DEBUG)
+        
+        self.validators = []
+        
+        mining_thread = threading.Thread(target=self.mine_new_block_periodically)
+        mining_thread.daemon = True
+        mining_thread.start()
+
+    @staticmethod
+    def serialize_and_create_single_hash(cls):
+        if not isinstance(cls, type):
+            raise TypeError(f"Expected class type, got {type(cls)}")
+
+        try:
+            class_dict = {
+                'attributes': {key: value for key, value in cls.__dict__.items() if not callable(value) and not key.startswith('__')},
+                'methods': {
+                    key: (value.__func__.__code__.co_code if isinstance(value, staticmethod) else value.__code__.co_code)
+                    for key, value in cls.__dict__.items() if callable(value)
+                }
+            }
+            class_serialized = json.dumps(class_dict, sort_keys=True, default=str)
+            logging.debug(f"Serialized class {cls.__name__}: {class_serialized}")
+            class_hash = hashlib.sha256(class_serialized.encode()).hexdigest()
+            return class_hash
+        except Exception as e:
+            logging.error(f"Error serializing class {cls.__name__}: {e}")
+            raise
+
+    @staticmethod
+    def verify_class_hashes():
+        """
+        This function retrieves the stored hashes of classes from the public API and compares them
+        with the hashes of the current local classes to ensure integrity.
+        """
+        try:
+            response = requests.get(HASH_API_URL)
+            if response.status_code != 200:
+                raise ValueError("Failed to fetch class hashes from public API.")
+
+            stored_hashes = response.json()
+        except Exception as e:
+            logging.error(f"Error fetching class hashes from public API: {e}")
+            raise
+
+        classes_to_verify = {
+            'coin': OMC,
+            'quantum_utils': QuantumUtils,
+            'transactions': Transactions,
+            'permission_manager': PermissionMngr,
+            'precursor_coin': pOMC,
+            'verifier': Verifier,
+            'crypto_utils': CUtils,
+            'fee_calculator': DynamicFeeCalculator,
+            'ledger': Ledger,
+            'treasury': OMCTreasury
+        }
+
+        for class_name, cls in classes_to_verify.items():
+            stored_hash = stored_hashes.get(class_name)
+            if not stored_hash:
+                logging.error(f"Stored hash for class {class_name} not found in the public API response.")
+                raise ValueError(f"Stored hash for class {class_name} not found.")
+
+            local_hash = Ledger.serialize_and_create_single_hash(cls)
+            if stored_hash != local_hash:
+                logging.error(f"Hash mismatch for class {class_name}. Possible tampering detected.")
+                raise ValueError(f"Hash mismatch for class {class_name}. Possible tampering detected.")
+
+        logging.info("All class hashes verified successfully. No tampering detected.")
+        return True
+
+    def initialize_node(self):
+        service_prefix = "node"
+        services = self.discover_services(service_prefix)
+        if services:
+            self.ping_services(services, "check_nodes", node.url)
+
+        node.steward = os.getenv('STEWARD_ADDRESS')
+        if not node.steward:
+            raise ValueError("Steward address not provided. Set the STEWARD_ADDRESS environment variable.")
+
+        self.update_node_state(node)
+        self.check_chain_length_and_sync(services)
+        self.update_validators()
+        self.broadcast_node_data(node)
+
+    def discover_services(self, prefix):
+        discovered_services = []
+        max_range = 10
+
+        for i in range(1, max_range):
+            service_name = f"{prefix}{i}.omne"
+            try:
+                service_address = socket.gethostbyname(service_name)
+
+                if service_address != node.url:
+                    discovered_services.append(service_name)
+                    logging.debug(f"Discovered service: {service_name}")
+
+            except socket.gaierror:
+                continue
+
+        if not discovered_services:
+            logging.warning("No services were discovered.")
+
+        return discovered_services
+
+    def ping_services(self, services, endpoint, current_node_url):
+        headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/{endpoint}"
+
+            if service_base_url == current_node_url:
+                logging.debug(f"Skipping self ping: {service_base_url}")
+                continue
+
+            logging.debug(f"Attempting to ping {service_url}")
+            try:
+                response = requests.get(service_url, headers=headers)
+                if response.status_code == 200:
+                    logging.debug(f"Successfully pinged {service_url}")
+                    received_nodes = response.json().get('nodes', [])
+                    for received_node in received_nodes:
+                        if not any(node['address'] == received_node['address'] for node in self.verifier.nodes):
+                            verifier.nodes.append(received_node)
+                            verifier.nodes.append(received_node)
+                            self.validators.append(received_node['address'])
+                            logging.debug(f"Added new node: {received_node['address']}")
+                else:
+                    logging.debug(f"Failed to ping {service_url}, status code: {response.status_code}")
+
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error pinging {service_url}: {e}")
+
+    def post_data_to_services(self, services, endpoint, data):
+        headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/{endpoint}"
+
+            if service_base_url == node.url:
+                logging.debug(f"Skipping self post: {service_url}")
+                continue
+
+            logging.debug(f"Attempting to post data to {service_url}")
+            try:
+                response = requests.post(service_url, json=data, headers=headers)
+                if response.status_code == 200:
+                    logging.debug(f"Successfully posted data to {service_url}")
+                else:
+                    logging.debug(f"Failed to post data to {service_url}, status code: {response.status_code}")
+
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error posting data to {service_url}: {e}")
+
+    def broadcast_self_info(self):
+        if not node or not node.address or not node.url:
+            logging.error("Node information is incomplete or incorrect. Cannot broadcast.")
+            return
+
+        node_info = node.to_dict()
+        logging.info(f"Broadcasting self node information: {node_info}")
+
+        services = self.discover_services("node")
+        if not services:
+            logging.warning("No other services discovered for broadcasting. Broadcast aborted.")
+            return
+
+        services = [service for service in services if service != node.url]
+        if not services:
+            logging.warning("No external services discovered for broadcasting. Broadcast aborted.")
+            return
+
+        self.post_data_to_services(services, "receive_node_info", node_info)
+        logging.info("Successfully broadcasted self node information to other services.")
+
+    def update_validators(self):
+        services = self.discover_services("node")
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/node_info"
+
+            if service_base_url == node.url:
+                continue
+
+            try:
+                response = requests.get(service_url)
+                if response.status_code == 200:
+                    node_data = response.json()
+                    if node_data['address'] not in self.validators:
+                        self.validators.append(node_data['address'])
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Failed to retrieve node information from {service}: {e}")
+
+    def sync_with_other_nodes(self, services):
+        my_chain_length = len(self.chain)
+        synchronized_chain = None
+        authoritative_node_url = None
+
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/get_chain"
+
+            if service_base_url == node.url:
+                continue
+
+            try:
+                response = requests.get(service_url)
+                if response.status_code == 200:
+                    other_chain = response.json()["chain"]
+                    if len(other_chain) > my_chain_length:
+                        my_chain_length = len(other_chain)
+                        synchronized_chain = other_chain
+                        authoritative_node_url = service_base_url
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error while trying to sync with {service_url}: {e}")
+
+        if synchronized_chain:
+            self.chain = synchronized_chain
+
+        return authoritative_node_url, synchronized_chain
+
+    def broadcast_node_data(self, node):
+        headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+        node_data_complete = {
+            'address': node.address,
+            'public_key': node.public_key,
+            'url': node.url,
+            'stake_weight': node.stake_weight,
+            'version': node.version,
+            'steward': node.steward
+        }
+
+        services = self.discover_services("node")
+
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/receive_node_data"
+
+            if service_base_url == node.url:
+                continue
+
+            logging.debug(f"Broadcasting node data to {service_url}")
+            try:
+                response = requests.post(service_url, json=node_data_complete, headers=headers)
+                if response.status_code == 201:
+                    logging.debug(f"Successfully broadcasted new node data to {service_url}")
+                elif response.status_code == 200:
+                    logging.debug(f"Node data already exists on {service_url}")
+                else:
+                    logging.warning(f"Failed to broadcast node data to {service_url}, status code: {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error broadcasting node data to {service_url}: {e}")
+                
+    def update_accounts(self, address, balance):
+        new_account = {
+            'address': address,
+            'balance': balance
+        }
+
+        service_prefix = "node"
+        services = self.discover_services(service_prefix)
+
+        filtered_services = [s for s in services if f"http://{s}:3400" != node.url]
+        self.post_data_to_services(filtered_services, "propagate_account", new_account)
+
+    def update_node_state(self, new_node):
+        if new_node not in self.verifier.nodes:
+            verifier.nodes.append(new_node)
+            self.validators.append(new_node.address)
+            logging.info(f"Node {new_node.address} added to local state.")
+
+    def mine_new_block_periodically(self, interval=9):
+        while True:
+            self.check_for_mining_opportunity()
+            time.sleep(interval * 60)
+
+    def check_for_mining_opportunity(self):
+        num_transactions = len(transactions.transactions)
+        if num_transactions >= 1:
+            self.check_pending_transactions()
+        elif 4 <= num_transactions < 15 and self.is_time_to_mine():
+            self.check_pending_transactions()
+
+    def is_time_to_mine(self):
+        latest_block = self.chain[-1]
+        block_timestamp = datetime.strptime(latest_block['timestamp'], "%Y-%m-%d %H:%M:%S.%f%z")
+        current_timestamp = datetime.now(timezone.utc)
+        
+        mining_interval = 9 * 60  # Fixed interval of 9 minutes
+        return (current_timestamp - block_timestamp).total_seconds() >= mining_interval
+
+    def create_new_wallet(self):
+        mnemonic = crypto_utils.generate_mnemonic()
+        account = self.wallet.account_manager.generate_account_from_mnemonic(mnemonic)
+        
+        # Add the new address with a balance of zero to the self.balance dictionary
+        with coin.balance_lock:
+            coin.balance[account['address']] = 0.0
+
+        wallet_creation_transaction = {
+            'address': account['address'],
+            'balance': 0.0,
+            'withdrawals': 0,
+            'type': 'c'
+        }
+
+        cleaned_transaction = {
+            'address': wallet_creation_transaction['address'],
+            'balance': wallet_creation_transaction['balance'],
+            'pub_key': account['pub_key'],
+            'sub_type': 'c',
+            'type': wallet_creation_transaction['type'],
+            'withdrawals': wallet_creation_transaction['withdrawals']
+        }
+
+        initial_balance = 0.0
+
+        account_dict = {
+            'address': wallet_creation_transaction['address'],
+            'balance': initial_balance,
+        }
+
+        sendable_transaction = {
+            'mnemonic': mnemonic,
+            'private_key': base64.b64encode(account['private_key']).decode('utf-8'),
+            'pub_key': account['pub_key'],
+            'address': account['address'],
+        }
+
+        return sendable_transaction
+
+    def create_new_wallet_from_seed(self, seed):
+        account = self.wallet.account_manager.generate_account_from_mnemonic(seed)
+
+        wallet_creation_transaction = {
+            'address': account['address'],
+            'balance': 0.0,
+            'withdrawals': 0,
+            'type': 'c'
+        }
+
+        cleaned_transaction = {
+            'address': wallet_creation_transaction['address'],
+            'balance': wallet_creation_transaction['balance'],
+            'pub_key': account['pub_key'],
+            'type': wallet_creation_transaction['type'],
+            'withdrawals': wallet_creation_transaction['withdrawals']
+        }
+
+        sendable_transaction = {
+            'mnemonic': account['mnemonic'],
+            'private_key': base64.b64encode(account['private_key']).decode('utf-8'),
+            'pub_key': account['pub_key'],
+            'address': account['address'],
+        }
+
+        private_key_bytes = base64.b64decode(sendable_transaction['private_key'])
+        signature = crypto_utils.sign_transaction(private_key_bytes, wallet_creation_transaction)
+
+        cleaned_transaction['signature'] = signature
+
+        self.transactions.transactions.append(cleaned_transaction)
+        self.update_accounts(wallet_creation_transaction['address'], wallet_creation_transaction['balance'])
+
+        return sendable_transaction
+
+    def get_chain_length(self):
+        return len(self.chain) if hasattr(self, "blockchain") else 0
+
+    def check_chain_length_and_sync(self, services):
+        service_prefix = "node"
+        services = self.discover_services(service_prefix)
+
+        authoritative_node_url, synchronized_chain = self.sync_with_other_nodes(services)
+
+        self.sync_account_list_data(authoritative_node_url, account_manager, coin, staked_coin)
+        self.sync_treasury_data(authoritative_node_url)
+
+        self.ping_services(services, "check_nodes", node.url)
+
+        if synchronized_chain is not None:
+            return {
+                "chain": synchronized_chain,
+                "message": "Chain synchronized successfully"
+            }
+        else:
+            return {
+                "chain": self.chain,
+                "message": "Chain synchronization failed"
+            }
+
+    def sync_account_list_data(self, authoritative_node_url, account_manager, coin, staked_coin):
+        if not authoritative_node_url:
+            logging.error("No authoritative node URL provided for account list data synchronization.")
+            return
+
+        service_url = f"{authoritative_node_url}/retrieve_accounts"
+
+        try:
+            response = requests.get(service_url)
+            if response.status_code == 200:
+                data = response.json()
+
+                main_accounts = data.get('data', [])
+                for new_acc in main_accounts:
+                    if 'address' in new_acc and 'balance' in new_acc:
+                        account = next((acc for acc in account_manager.accounts if acc['address'] == new_acc['address']), None)
+                        if account:
+                            account['balance'] = new_acc['balance']
+                            coin.balance[new_acc['address']] = new_acc['balance']
+                            logging.info(f"Updated main account {new_acc['address']} for {coin.name}.")
+                        else:
+                            account_manager.accounts.append(new_acc)
+                            coin.balance[new_acc['address']] = new_acc['balance']
+                            logging.info(f"Added new main account {new_acc['address']} for {coin.name}.")
+
+                precursor_accounts = data.get('precursor_accounts', [])
+                for new_acc in precursor_accounts:
+                    if 'address' in new_acc and 'balance' in new_acc:
+                        account = next((acc for acc in account_manager.precursor_accounts if acc['address'] == new_acc['address']), None)
+                        if account:
+                            account['balance'] = new_acc['balance']
+                            coin.balance[new_acc['address']] = new_acc['balance']
+                            logging.info(f"Updated precursor account {new_acc['address']} for {coin.name}.")
+                        else:
+                            account_manager.precursor_accounts.append(new_acc)
+                            coin.balance[new_acc['address']] = new_acc['balance']
+                            logging.info(f"Added new precursor account {new_acc['address']} for {coin.name}.")
+
+                staking_accounts = data.get('staking_accounts', [])
+                for new_acc in staking_accounts:
+                    if 'address' in new_acc and 'min_term' in new_acc:
+                        account = next((acc for acc in staking_manager.staking_agreements if acc['address'] == new_acc['address']), None)
+                        if account:
+                            account['amount'] = new_acc['amount']
+                            account['withdrawals'] = new_acc['withdrawals']
+                            staked_coin.balance[new_acc['address']] = new_acc['amount']
+                            logging.info(f"Updated staking account {new_acc['address']} for {staked_coin.name}.")
+                        else:
+                            staked_coin.accounts.append(new_acc)
+                            staking_manager.staking_agreements.append(new_acc)
+                            staked_coin.balance[new_acc['address']] = new_acc['amount']
+                            logging.info(f"Added new staking account {new_acc['address']} for {staked_coin.name}.")
+
+                self.validators = data.get('validators', [])
+                if node.address not in self.validators:
+                    self.validators.append(node.address)
+
+                notification_data = {"message": "Data updated from authoritative node"}
+                self.post_data_to_services(self.discover_services("node"), "notify_data_update", notification_data)
+
+                logging.warning(f"Synchronized account list data with the authoritative node: {authoritative_node_url}")
+            else:
+                logging.error(f"Failed to retrieve account data from {service_url}, status code: {response.status_code}")
+        except requests.RequestException as e:
+            logging.error(f"Error retrieving account data from {service_url}: {e}")
+    
+    def sync_treasury_data(self, authoritative_node_url):
+        if not authoritative_node_url:
+            logging.error("No authoritative node URL provided for treasury data synchronization.")
+            return False
+
+        service_url = f"{authoritative_node_url}/retrieve_treasury_data"
+
+        try:
+            response = requests.get(service_url)
+            if response.status_code == 200:
+                response_data = response.json()
+                if 'treasury_address' in response_data:
+                    treasury.update_treasury_data(response_data['treasury_address'])
+                    logging.warning("Synchronized treasury data with the authoritative node: %s", authoritative_node_url)
+                    return True
+                else:
+                    logging.error(f"No treasury account data found in the response from {service_url}")
+                    return False
+            else:
+                logging.error(f"Failed to retrieve treasury data from {service_url}, status code: {response.status_code}")
+                return False
+        except requests.RequestException as e:
+            logging.error(f"Error retrieving treasury data from {service_url}: {e}")
+            return False
+    
+    def add_account(self, account_data):
+        address = account_data.get('address')
+        balance_float = account_data.get('balance_float', 0)
+        new_account = {}
+        new_account['address'] = address
+        new_account['balance'] = balance_float
+
+        account_manager.accounts.append(new_account)
+        coin.balance[address] = balance_float
+
+        logging.info(f"Added/Updated account: {address} with balance {balance_float}")
+
+    def add_staking_account(self, data):
+        account_manager.staking_accounts.append(data)
+        staked_coin.accounts.append(data)
+        staking_manager.staking_accounts.append(data)
+
+    def get_init_date(self):
+        return coin.init_date
+
+    def validate_chain(self, chain):
+        previous_block = chain[0]
+        for block in chain[1:]:
+            if block['previous_hash'] != previous_block['hash']:
+                return False
+
+            block_data = block.copy()
+            block_data.pop('hash')
+            calculated_hash = self.calculate_block_hash(block_data)
+
+            if block['hash'] != calculated_hash:
+                return False
+
+            if not self.validate_stake(block):
+                return False
+
+            previous_block = block
+
+        return True
+
+    def add_block(self, block):
+        logging.info(f"Attempting to add block with index {block['index']}")
+        if self.validate_received_block(block):
+            with self.lock:
+                if block['index'] == len(self.chain) + 1 and \
+                   block['previous_hash'] == self.chain[-1]['hash']:
+                    self.chain.append(block)
+                    self.block_hashes.add(block['hash'])
+                    logging.info(f"Block with index {block['index']} successfully added to the chain.")
+                    self.broadcast_block(block)
+                    return True
+                else:
+                    logging.warning(f"Block with index {block['index']} failed to match chain continuity.")
+        else:
+            logging.warning(f"Block with index {block['index']} failed validation.")
+        return False
+    
+    def broadcast_block(self, new_block):
+        block_data = json.dumps(new_block)
+
+        service_prefix = "node"
+        services = self.discover_services(service_prefix)
+
+        self.post_data_to_services(services, "blocks/receive_block", block_data)
+        
+    def validate_foreign_tx(self, address, hash, pub_key, tx, signature):
+        logging.debug(f"Validating tx from {address}")
+
+        tx_hash = quantum_utils.quantum_resistant_hash(json.dumps(tx, sort_keys=True))
+        if tx_hash != hash:
+            logging.error(f"Hash mismatch for transaction with hash: {hash}")
+            return None
+
+        if not CUtils.verify_transaction(pub_key, tx, signature):
+            logging.error(f"Invalid signature in foreign transaction with hash: {hash} from address: {address}")
+            return None
+
+        return True
+
+    def vote_on_local_tx(self, address, hash, pub_key, tx, signature):
+        valid_votes = []
+        services = ledger.discover_services("node")
+
+        if len(services) == 1 and services[0] == node.url:
+            logging.info("Only one validator in the network, bypassing the voting process.")
+            valid_votes.append(node.url)
+
+        filtered_services = [s for s in services if f"http://{s}:3400" != node.url]
+        for service in filtered_services:
+            service_url = f"http://{service}:3400/vote_on_tx"
+
+            try:
+                data = {
+                    'address': address,
+                    'hash': hash,
+                    'pub_key': pub_key,
+                    'new_tx': tx,
+                    'signature': signature
+                }
+                response = requests.post(service_url, json=data)
+                if response.status_code == 200 and response.json().get('message') == 'Tx is valid':
+                    valid_votes.append(service)
+                    logging.info(f"Validator {service} approved the tx.")
+                else:
+                    logging.info(f"Validator {service} did not approve the tx.")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error voting on block with {service}: {e}")
+
+        return valid_votes
+
+    def reach_tx_consensus(self, address, hash, pub_key, tx, signature):
+        if len(self.validators) == 1:
+            logging.info("Automatically reaching consensus with single validator")
+            return True
+
+        consensus_reached = self.vote_on_local_tx(address, hash, pub_key, tx, signature)
+
+        if consensus_reached:
+            logging.info("Tx consensus reached")
+            return True
+        else:
+            logging.info("Tx consensus not reached")
+            return False
+
+    def receive_tx(self, address, hash, pub_key, tx, signature):
+        try:
+            if not self.validate_foreign_tx(address, hash, pub_key, tx, signature):
+                logging.error(f"Received transaction, with hash {hash} from wallet {address}, did not pass verification")
+                return False
+
+            return True
+        except Exception as e:
+            logging.error(f"Error processing received transaction: {str(e)}")
+            return False
+
+    def receive_block(self, block):
+        try:
+            services = ledger.discover_services("node")
+            authoritative_node_url, _ = ledger.sync_with_other_nodes(services)
+
+            if authoritative_node_url:
+                ledger.sync_account_list_data(authoritative_node_url, account_manager, coin, staked_coin)
+                ledger.sync_treasury_data(authoritative_node_url)
+
+            return True
+        except Exception as e:
+            logging.error(f"Error processing received block: {str(e)}")
+            return False
+
+    def broadcast_tx(self, address, hash, pub_key, new_tx, signature):
+        data = {
+            'address': address,
+            'hash': hash,
+            'pub_key': pub_key,
+            'new_tx': new_tx,
+            'signature': signature
+        }
+
+        services = ledger.discover_services("node")
+
+        ledger.post_data_to_services(services, "transaction/receive_tx", data)
+
+        return True
+    
+    def randomly_select_validator(self):
+        if not self.validators:
+            logging.warning("No validators available.")
+            return None
+
+        try:
+            if len(self.validators) == 1:
+                validator_address = self.validators[0]
+                logging.info(f"Only one validator available. Selected validator address: {validator_address}")
+                return validator_address
+
+            max_value = len(self.validators) - 1
+            random_bytes = QuantumUtils.quantum_random_bytes((max_value.bit_length() + 7) // 8)
+            random_int = int.from_bytes(random_bytes, 'big') % (max_value + 1)
+            validator_address = self.validators[random_int]
+            logging.info(f"Randomly selected validator address: {validator_address}")
+            return validator_address
+        except Exception as e:
+            logging.error(f"Error generating random index: {e}")
+            return None
+
+    def trigger_sync_on_all_nodes(self):
+        services = ledger.discover_services("node")
+
+        data = {}
+
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+
+            if service_base_url == node.url:
+                logging.debug(f"Skipping self sync trigger: {service_base_url}")
+                continue
+
+            service_url = f"{service_base_url}/trigger_sync"
+            logging.debug(f"Attempting to trigger sync on {service_url}")
+            try:
+                response = requests.post(service_url, json=data)
+                if response.status_code == 200:
+                    logging.debug(f"Successfully triggered sync on {service_url}")
+                else:
+                    logging.debug(f"Failed to trigger sync on {service_url}, status code: {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error triggering sync on {service_url}: {e}")
+
+    def validate_received_block(self, block):
+        logging.debug(f"Validating received block with index {block['index']}")
+        if not self.validate_block_structure(block):
+            logging.error("Block structure validation failed.")
+            return False
+
+        if not self.validate_block(block):
+            logging.error("Block content validation failed.")
+            return False
+
+        if block['index'] != len(self.chain) + 1:
+            logging.error(f"Block index {block['index']} does not follow the current chain length.")
+            return False
+
+        return True
+
+    def validate_block_structure(self, block):
+        logging.debug(f"Checking block structure for block with index {block['index']}")
+        required_fields = [
+            'index', 'previous_hash', 'timestamp', 'transactions',
+            'merkle_root', 'stake_threshold', 'hash', 'miner', 'miner_share',
+            'validator', 'validator_share', 'fee'
+        ]
+
+        missing_fields = [field for field in required_fields if field not in block]
+        if missing_fields:
+            logging.error(f"Block missing required fields: {missing_fields}")
+            return False
+
+        field_type_issues = False
+        for field in required_fields:
+            if field in block:
+                expected_type = (int if field in ['index', 'timestamp'] else
+                                 str if field in ['previous_hash', 'hash', 'miner', 'validator', 'merkle_root'] else
+                                 list if field == 'transactions' else
+                                 (int, float) if field in ['stake_threshold', 'fee', 'miner_share', 'validator_share'] else
+                                 None)
+                actual_type = type(block[field])
+                if not isinstance(block[field], expected_type):
+                    logging.error(f"Field '{field}' type mismatch: expected {expected_type}, got {actual_type}")
+                    field_type_issues = True
+            else:
+                logging.error(f"Field '{field}' is missing from the block.")
+                field_type_issues = True
+
+        if field_type_issues:
+            logging.error("One or more block field types are incorrect.")
+            return False
+
+        logging.debug("Block structure validated successfully.")
+        return True
+    
+    def reach_consensus(self, proposed_block):
+        if len(self.validators) == 1:
+            logging.info("Automatically reaching consensus with single validator")
+            return True
+
+        consensus_reached = self.vote_on_local_block(proposed_block)
+
+        if consensus_reached:
+            logging.info("Consensus reached")
+            return True
+        else:
+            logging.info("Consensus not reached")
+            return False
+
+    def vote_on_local_block(self, block):
+        valid_votes = []
+        services = self.discover_services("node")
+
+        if len(services) == 1 and services[0] == node.url:
+            logging.info("Only one validator in the network, bypassing the voting process.")
+            valid_votes.append(node.url)
+
+        filtered_services = [s for s in services if f"http://{s}:3400" != node.url]
+        for service in filtered_services:
+            service_url = f"http://{service}:3400/vote_on_block"
+
+            try:
+                response = requests.post(service_url, json=block)
+                if response.status_code == 200 and response.json().get('message') == 'Block is valid':
+                    valid_votes.append(service)
+                    logging.info(f"Validator {service} approved the block.")
+                else:
+                    logging.info(f"Validator {service} did not approve the block.")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error voting on block with {service}: {e}")
+
+        return valid_votes
+
+    def validate_block(self, block):
+        logging.debug(f"Validating block with index {block['index']}")
+        if block['validator'] not in self.validators:
+            logging.error("Block validator is not recognized.")
+            return False
+
+        if not self.proof_of_stake(block):
+            return False
+
+        unique_addresses = set()
+        double_spent_addresses = set()
+        for transaction in block['transactions']:
+            sender_address = transaction.get('address')
+            if sender_address in unique_addresses:
+                double_spent_addresses.add(sender_address)
+            unique_addresses.add(sender_address)
+
+        if double_spent_addresses:
+            logging.error(f"Double spending detected for addresses: {', '.join(double_spent_addresses)}")
+            raise DoubleSpendingError("Double spending detected for addresses: " + ', '.join(double_spent_addresses))
+
+        block_string = str(block['index']) + str(block['timestamp']) + str(block['previous_hash']) + str(
+            block['transactions']) + str(block['fee']) + str(block['validator']) + str(block['validator_share'])
+
+        generated_hash = hashlib.sha256(block_string.encode()).hexdigest()
+        if block['hash'] != generated_hash:
+            logging.error("Block hash does not match the generated hash.")
+            return False
+
+        if not self.reach_consensus(block):
+            logging.error("Failed to reach consensus.")
+            return False
+
+        logging.info(f"Block with index {block['index']} passed all validations.")
+        return True
+
+    def validate_foreign_block(self, block):
+        logging.debug(f"Validating block with index {block['index']}")
+        if block['validator'] not in self.validators:
+            logging.error("Block validator is not recognized.")
+            return False
+
+        if not self.proof_of_stake(block):
+            return False
+
+        unique_addresses = set()
+        double_spent_addresses = set()
+        for transaction in block['transactions']:
+            sender_address = transaction.get('address')
+            if sender_address in unique_addresses:
+                double_spent_addresses.add(sender_address)
+            unique_addresses.add(sender_address)
+
+        if double_spent_addresses:
+            logging.error(f"Double spending detected for addresses: {', '.join(double_spent_addresses)}")
+            raise DoubleSpendingError("Double spending detected for addresses: " + ', '.join(double_spent_addresses))
+
+        block_string = str(block['index']) + str(block['timestamp']) + str(block['previous_hash']) + str(
+            block['transactions']) + str(block['fee']) + str(block['validator']) + str(block['validator_share'])
+
+        generated_hash = hashlib.sha256(block_string.encode()).hexdigest()
+        if block['hash'] != generated_hash:
+            logging.error("Block hash does not match the generated hash.")
+            return False
+
+        return True
+
+    def generate_block_hash(self, block):
+        transactions_string = json.dumps(block['transactions'], sort_keys=True)
+
+        block_contents = (
+            str(block['index']) +
+            str(block['timestamp']) +
+            str(block['previous_hash']) +
+            transactions_string +
+            str(block['fee']) +
+            str(block['miner']) +
+            str(block['miner_share']) +
+            str(block['validator']) +
+            str(block['validator_share'])
+        )
+
+        block_hash = hashlib.sha256(block_contents.encode()).hexdigest()
+        return block_hash
+    
+    def proof_of_stake(self, block):
+        logging.info("Starting proof of stake validation.")
+
+        total_stake_weight = sum(node['stake_weight'] if isinstance(node, dict) else node.stake_weight for node in self.verifier.nodes)
+        random_number = random.uniform(0, total_stake_weight)
+        cumulative_stake_weight = 0
+
+        logging.info(f"Total stake weight: {total_stake_weight}, Random number for validator selection: {random_number}")
+
+        for current_node in self.verifier.nodes:
+            node_stake_weight = current_node['stake_weight'] if isinstance(current_node, dict) else current_node.stake_weight
+            cumulative_stake_weight += node_stake_weight
+
+            if cumulative_stake_weight > random_number:
+                selected_validator_address = current_node['address'] if isinstance(current_node, dict) else current_node.address
+                logging.info(f"Selected validator address: {selected_validator_address}, Stake weight: {node_stake_weight}")
+
+                if selected_validator_address == block['validator']:
+                    logging.info(f"Validator {selected_validator_address} matches the block's validator.")
+                    if node_stake_weight >= block['stake_threshold']:
+                        logging.info(f"Validator {selected_validator_address} meets the stake threshold.")
+                        return node_stake_weight
+                    else:
+                        logging.error(f"Validator {selected_validator_address} does not meet the stake threshold.")
+                        return 0
+
+        logging.error("No suitable validator found or the selected validator does not meet the stake threshold.")
+        return 0
+
+    def add_coin_transaction(self, address: str, amount: int, converted_amount: Union[int, float], fee: Union[int, float], hash: str, pub_key: str, signature: str, sub_type: str, type: str) -> Union[bool, str]:
+
+        cleaned_transaction = {
+            'address': address,
+            'amount': amount,
+            'converted_amount': converted_amount,
+            'fee': fee,
+            'hash': hash,
+            'pub_key': pub_key,
+            'signature': signature,
+            'sub_type': sub_type,
+            'type': type
+        }
+
+        if cleaned_transaction['signature']:
+            return cleaned_transaction
+        
+    def select_miner(self) -> dict:
+        accounts = staking_manager.staking_agreements
+
+        # If no accounts are available, return None
+        if not accounts:
+            logging.warning("No staking accounts available for miner selection.")
+            return None
+
+        # Calculate the number of withdrawals for each account
+        for account in accounts:
+            account['withdrawals'] = sum(1 for block in self.chain for transaction in block['transactions']
+                                        if 'address' in transaction and transaction.get('address') == account['address'])
+
+        # Select the miner based on weighted selection
+        miner = self.weighted_selection(accounts)
+        return miner
+
+    def weighted_selection(self, accounts: List[dict]) -> dict:
+        # Calculate weights based on the number of withdrawals for each account
+        weights = [1 / (acc['withdrawals'] + 1) for acc in accounts]
+        total_weight = sum(weights)
+
+        # Normalize the weights to ensure their sum is 1
+        normalized_weights = [weight / total_weight for weight in weights]
+
+        # Select an account using the normalized weights
+        chosen_account = random.choices(
+            accounts, weights=normalized_weights, k=1)[0]
+        return chosen_account
+
+    def calculate_fee_distribution(self, total_fee):
+        fee_distribution = {}
+
+        validator_percentage = 0.45
+        miner_percentage = 0.315
+        treasury_percentage = 0.235  # Updated to include the burn percentage
+
+        fee_distribution['validator_share'] = total_fee * validator_percentage
+        fee_distribution['miner_share'] = total_fee * miner_percentage
+        fee_distribution['treasury_share'] = total_fee * treasury_percentage
+
+        return fee_distribution
+    
+    def select_validator(self, block):
+        selected_validator = self.verifier.select_validator(block)
+        return selected_validator if selected_validator else None
+
+    def validate_selected_validator(self, selected_validator, block):
+        if selected_validator.malicious or selected_validator not in verifier.nodes:
+            return False
+
+        if selected_validator.address == block['validator'] and \
+                selected_validator.stake_weight >= block['stake_threshold']:
+            return True
+
+        return False
+
+    def add_malicious_validator(self, validator_address):
+        for node in verifier.nodes:
+            if node.address == validator_address:
+                node.malicious = True
+                break
+
+    def create_new_block(self, transactions):
+        latest_block = self.chain[-1]
+        block_index = latest_block['index'] + 1
+        timestamp = int(datetime.now(timezone.utc).timestamp())
+        previous_hash = latest_block['hash']
+        stake_threshold = node.stake_weight
+
+        processed_transactions, total_fee = self.process_transactions(transactions)
+        block_fee = self.coin.mint_for_block_fee(total_fee)
+        fee_distribution = self.calculate_fee_distribution(block_fee)
+        miner = self.select_miner()
+
+        if miner is None:
+            logging.error("Failed to select a miner. Aborting block creation.")
+            return
+
+        miner_address = miner['address']
+
+        block = {
+            'index': block_index,
+            'timestamp': timestamp,
+            'previous_hash': previous_hash,
+            'transactions': processed_transactions,
+            'stake_threshold': stake_threshold,
+            'fee': block_fee
+        }
+
+        validator_node = self.select_validator(block)
+        if validator_node:
+            validator_address = validator_node['address'] if isinstance(validator_node, dict) else getattr(validator_node, 'address', node.address)
+        else:
+            validator_address = node.address
+
+        for transaction in transactions:
+            merkle_tree.add_transaction(str(transaction))
+
+        merkle_tree.create_tree()
+        merkle_root = merkle_tree.get_merkle_root()
+
+        self.coin.credit(validator_address, fee_distribution['validator_share'])
+        self.coin.credit(miner_address, fee_distribution['miner_share'])
+        self.coin.credit(self.coin.treasury_address, fee_distribution['treasury_share'])
+
+        new_block = {
+            'index': block_index,
+            'timestamp': timestamp,
+            'previous_hash': previous_hash,
+            'transactions': processed_transactions,
+            'merkle_root': merkle_root,
+            'stake_threshold': stake_threshold,
+            'fee': block_fee,
+            'miner': miner_address,
+            'miner_share': fee_distribution['miner_share'],
+            'validator': validator_address,
+            'validator_share': fee_distribution['validator_share'],
+            'treasury_share': fee_distribution['treasury_share']
+        }
+
+        logging.info(f"constructed block: {new_block}")
+
+        block_string = str(new_block['index']) + str(new_block['timestamp']) + str(new_block['previous_hash']) + str(
+            new_block['transactions']) + str(new_block['fee']) + str(new_block['validator']) + str(new_block['validator_share'])
+
+        # Generate block hash
+        block_hash = hashlib.sha256(block_string.encode()).hexdigest()
+
+        new_block['hash'] = block_hash
+
+        if self.add_block(new_block):
+            self.transactions.cleaned_transactions = []
+            logging.info(f"Successfully mined new block: {new_block}")
+            return new_block
+        else:
+            logging.debug(f"Issue mining block: {new_block}")
+
+    def process_transactions(self, transactions):
+        processed_transactions = []
+        total_fee = 0.0
+
+        for transaction in transactions:
+            transaction_type = transaction.get('sub_type')
+
+            if transaction_type == 'r':
+                processed_transaction = self.handle_staking_transaction(transaction)
+            elif transaction_type == 'o':
+                processed_transaction = self.handle_unstaking_transaction(transaction)
+            elif transaction_type == 'k':
+                processed_transaction = self.handle_transfer_transaction(transaction)
+            elif transaction_type == 'w':
+                processed_transaction = self.handle_pomc_whitelist_transaction(transaction)
+            elif transaction_type in ['h', 'x', 'm', 'pr']:
+                processed_transaction = self.handle_fee_payment_transaction(transaction)
+            else:
+                processed_transaction = self.handle_default_transaction(transaction)
+
+            if processed_transaction:
+                processed_transactions.append(processed_transaction)
+                total_fee += processed_transaction.get('fee', 0.0)
+
+        return processed_transactions, total_fee
+
+    def handle_staking_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            sender_address = transaction['address']
+            staking_amount = transaction['amount']
+            min_term = transaction['min_term']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            transaction_data = {
+                'address': sender_address,
+                'amount': staking_amount,
+                'min_term': min_term,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            transaction_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            if not all([sender_address, staking_amount, min_term, pub_key, signature]):
+                logging.error("Missing fields in staking transaction")
+                return None
+
+            sender_balance_info = self.wallet.get_account_balance(sender_address)
+            if not sender_balance_info or sender_balance_info['balance_float'] < staking_amount + transaction_fee:
+                logging.error("Insufficient balance for staking")
+                return None
+
+            transaction_for_verification = {
+                'address': sender_address,
+                'amount': staking_amount,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'min_term': min_term,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            if not crypto_utils.verify_transaction(transaction['pub_key'], transaction_for_verification, transaction['signature']):
+                logging.error("Invalid signature in staking transaction")
+                return None
+
+            self.wallet.stake_coins(sender_address, staking_amount, min_term)
+
+            processed_transaction = {
+                'address': sender_address,
+                'amount': staking_amount,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'min_term': min_term,
+                'stake_threshold': 3,
+                'type': transaction['type'],
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed staking transaction for {sender_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing staking transaction: {e}")
+            return None
+
+    def handle_unstaking_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            sender_address = transaction['address']
+            contract_id = transaction['contract_id']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            transaction_data = {
+                'address': sender_address,
+                'contract_id': contract_id,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            transaction_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            if not all([sender_address, contract_id, pub_key, signature]):
+                logging.error("Missing fields in unstaking transaction")
+                return None
+
+            sender_balance_info = self.wallet.get_account_balance(sender_address)
+            if not sender_balance_info or sender_balance_info['balance_float'] < transaction_fee:
+                logging.error("Insufficient balance for unstaking")
+                return None
+
+            transaction_for_verification = {
+                'address': sender_address,
+                'contract_id': contract_id,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            if not crypto_utils.verify_transaction(transaction['pub_key'], transaction_for_verification, transaction['signature']):
+                logging.error("Invalid signature in unstaking transaction")
+                return None
+
+            self.wallet.unstake_coins(sender_address, contract_id)
+
+            processed_transaction = {
+                'address': sender_address,
+                'contract_id': contract_id,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'stake_threshold': 2,
+                'type': transaction['type'],
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed unstaking transaction for {sender_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing unstaking transaction: {e}")
+            return None
+
+    def handle_transfer_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            sender_address = transaction['sender']
+            recipient_address = transaction['recipient']
+            transfer_amount = transaction['amount']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            transaction_data = {
+                'sender': sender_address,
+                'recipient': recipient_address,
+                'amount': transfer_amount,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            transaction_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            if not all([sender_address, recipient_address, transfer_amount, pub_key, signature]):
+                logging.error("Missing fields in transfer transaction")
+                return None
+
+            sender_balance_info = self.wallet.get_account_balance(sender_address)
+            if not sender_balance_info or sender_balance_info['balance_float'] < transfer_amount + transaction_fee:
+                logging.error("Insufficient balance for transfer")
+                return None
+
+            transaction_for_verification = {
+                'sender': sender_address,
+                'recipient': recipient_address,
+                'amount': transfer_amount,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            if not crypto_utils.verify_transaction(transaction['pub_key'], transaction_for_verification, transaction['signature']):
+                logging.error("Invalid signature in transfer transaction")
+                return None
+
+            self.wallet.transfer(sender_address, recipient_address, transfer_amount)
+
+            processed_transaction = {
+                'sender': sender_address,
+                'recipient': recipient_address,
+                'amount': transfer_amount,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'stake_threshold': 2,
+                'type': transaction['type'],
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed transfer transaction from {sender_address} to {recipient_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing transfer transaction: {e}")
+            return None
+    
+    def handle_pomc_whitelist_transaction(self, transaction):
+        try:
+            
+            sender_address = transaction['sender']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            processed_transaction = {
+                'fee': transaction['fee'],
+                'hash': transaction['hash'],
+                'sender': transaction['sender'],
+                'sub_type': transaction['sub_type'],
+                'stake_threshold': 2,
+                'type': transaction['type'],
+                'when': transaction['when']
+            }
+
+            logging.info(f"Processed transfer transaction from {sender_address} to join pOMC whitelist")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing transfer transaction: {e}")
+            return None
+
+    def handle_fee_payment_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            payer_address = transaction['from']
+            fee_amount = transaction['fee']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            transaction_data = {
+                'from': payer_address,
+                'fee': fee_amount,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            calculated_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            if not all([payer_address, fee_amount, pub_key, signature]):
+                logging.error("Missing fields in fee payment transaction")
+                return None
+
+            payer_balance_info = self.wallet.get_account_balance(payer_address)
+            if not payer_balance_info or payer_balance_info['balance_float'] < fee_amount + calculated_fee:
+                logging.error("Insufficient balance for fee payment")
+                return None
+
+            transaction_for_verification = {
+                'from': payer_address,
+                'fee': calculated_fee,
+                'hash': transaction_hash,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            if not crypto_utils.verify_transaction(transaction['pub_key'], transaction_for_verification, transaction['signature']):
+                logging.error("Invalid signature in fee payment transaction")
+                return None
+
+            self.wallet.pay_fee(payer_address, fee_amount)
+
+            processed_transaction = {
+                'from': payer_address,
+                'fee': calculated_fee,
+                'hash': transaction_hash,
+                'stake_threshold': 2,
+                'type': transaction['type'],
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed fee payment transaction from {payer_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing fee payment transaction A1: {e}")
+            return None
+
+    def handle_default_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            payer_address = transaction['address']
+
+            transaction_data = {
+                'from': payer_address,
+                'type': 'e'
+            }
+
+            calculated_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            processed_transaction = {
+                'from': payer_address,
+                'fee': 0.0,
+                'hash': transaction_hash,
+                'stake_threshold': 1,
+                'type': 'e',
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed fee payment transaction from {payer_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing fee payment transaction A2: {e}")
+            return None
+
+    def clean_and_verify_transactions(self):
+        new_transactions = self.transactions.batch_pending_transactions()
+        cleaned_transactions = []
+
+        for transaction in new_transactions:
+            try:
+                if transaction['type'] == 'c' and transaction['sub_type'] == 'c':
+                    self.process_account_creation_transaction(transaction)
+                elif transaction['type'] == 'c' and transaction['sub_type'] == 'w':
+                    self.process_add_account_to_whitelist_transaction(transaction)
+                elif transaction['type'] == 'o':
+                    self.process_non_f_transaction(transaction)
+                elif transaction['type'] == 'e':
+                    self.process_f_transaction(transaction)
+            except Exception as e:
+                logging.error(f"Error processing transaction {transaction['type']}: {e}")
+
+        return cleaned_transactions
+    
+    def process_account_creation_transaction(self, transaction):
+        # Verify that the transaction is of the correct type
+        if transaction['type'] != 'c':
+            logging.error(f"Invalid transaction type for account creation: {transaction['type']}")
+            return
+
+        try:
+            # Extract necessary fields from the transaction
+            address = transaction['address']
+            balance = transaction['balance']
+            type = transaction['type']
+            timestamp = ['timestamp']
+            withdrawals = transaction['withdrawals']
+
+            # Validate the transaction data
+            if not all([address, type]):
+                logging.error("Incomplete account creation transaction data")
+                return
+
+            # Check if the address already exists in the blockchain wallet
+            # if any(acc['address'] == address for acc in account_manager.accounts):
+            #     logging.info(f"Account already exists: {address}")
+            #     return
+
+            # # Create and append the new account to the wallet
+            # new_account = {
+            #     'address': address,
+            #     'balance': balance,
+            #     'withdrawals': withdrawals
+            # }
+            # account_manager.accounts.append(new_account)
+
+            # Create a cleaned version of the transaction for the blockchain
+            cleaned_transaction = {
+                'address': address,
+                'hash': transaction.get('hash'),
+                'pub_key': transaction['pub_key'],
+                'signature': transaction['signature'],
+                'sub_type': 'c',
+                'type': transaction['type'],
+                'withdrawals': withdrawals
+            }
+
+            # Append the cleaned transaction to the list of processed transactions
+            self.transactions.cleaned_transactions.append(cleaned_transaction)
+            logging.info(f"Processed account creation transaction for {address}")
+
+        except Exception as e:
+            logging.error(f"Error processing account creation transaction A2: {e}")
+            
+    def process_add_account_to_whitelist_transaction(self, transaction):
+        # Verify that the transaction is of the correct type
+        if transaction['type'] != 'c':
+            logging.error(f"Invalid transaction type to add account to whitelist: {transaction['type']}")
+            return
+
+        try:
+            result = {
+                'fee': transaction['fee'],
+                'hash': transaction['hash'],
+                'pub_key': transaction['pub_key'],
+                'sender': transaction['sender'],
+                'signature': transaction['signature'],
+                'sub_type': transaction['sub_type'],
+                'type': transaction['type'],
+                'when': transaction['when']
+            }
+            # Extract necessary fields from the transaction
+            address = transaction['sender']
+            hash = transaction['hash']
+            type = transaction['type']
+
+            # Validate the transaction data
+            if not all([address, hash, type]):
+                logging.error("Incomplete account creation transaction data")
+                return
+
+            # Create a cleaned version of the transaction for the blockchain
+            cleaned_transaction = {
+                'fee': transaction['fee'],
+                'hash': transaction['hash'],
+                'pub_key': transaction['pub_key'],
+                'sender': transaction['sender'],
+                'signature': transaction['signature'],
+                'sub_type': transaction['sub_type'],
+                'type': transaction['type'],
+                'when': transaction['when']
+            }
+
+            # Append the cleaned transaction to the list of processed transactions
+            self.transactions.cleaned_transactions.append(cleaned_transaction)
+            logging.info(f"Processed join whitelist transaction for {address}")
+
+        except Exception as e:
+            logging.error(f"Error processing join whiteist transaction A2: {e}")
+
+    def process_f_transaction(self, transaction):
+        try:
+            transaction_type = transaction.get('type')
+            sender_address = transaction.get('address')
+            transaction_fee = transaction.get('fee', 0.0)
+
+            if not sender_address or transaction_fee is None:
+                logging.error("Invalid transaction format.")
+                return None
+
+            cleaned_transaction = None
+
+            if transaction_type == 'e':
+                sub_tx_type = transaction.get('sub_type')
+
+                if sub_tx_type == 'p':
+                    amount = transaction.get('amount')
+                    recipient_address = transaction.get('recipient')
+
+                    if crypto_utils.verify_transaction(sender_address, recipient_address, amount):
+                        self.wallet.transfer(sender_address, recipient_address, amount)
+
+                elif sub_tx_type == 'r':
+                    amount = transaction.get('amount')
+                    min_term = transaction.get('min_term')
+
+                    self.wallet.stake_coins(sender_address, amount, min_term)
+
+                elif sub_tx_type == 'z':
+                    contract_id = transaction.get('contract_id')
+
+                    self.wallet.unstake_coins(sender_address, contract_id)
+
+            if cleaned_transaction:
+                self.transactions.cleaned_transactions.append(cleaned_transaction)
+                logging.info(f"Processed transaction of type {transaction_type} for {sender_address}")
+                return cleaned_transaction
+            else:
+                logging.warning(f"Unhandled or failed transaction type/subtype: {transaction_type}/{sub_tx_type}")
+                return None
+
+        except Exception as e:
+            logging.error(f"Error processing account creation transaction A2: {e}")
+
+    def process_non_f_transaction(self, transaction):
+        try:
+            transaction_type = transaction.get('type')
+            sender_address = transaction.get('address')
+            transaction_fee = transaction.get('fee', 0.0)
+
+            if not sender_address or transaction_fee is None:
+                logging.error("Invalid transaction format.")
+                return None
+
+            cleaned_transaction = None
+
+            if transaction_type == 'o':
+                sub_tx_type = transaction.get('sub_type')
+
+                if sub_tx_type == 's':
+                    self.handle_post_transaction(transaction)
+
+                elif sub_tx_type == 'j':
+                    refined_transaction = self.handle_add_profile_transaction(transaction)
+                    if refined_transaction:
+                        cleaned_transaction = {
+                            'address': transaction['address'],
+                            'avi': transaction['avi'],
+                            'clubs': transaction['clubs'],
+                            'fee': transaction['fee'],
+                            'handle': transaction['handle'],
+                            'hash': transaction['hash'],
+                            'intro': transaction['intro'],
+                            'joined': transaction['joined'],
+                            'name': transaction['name'],
+                            'profile_id': transaction['profile_id'],
+                            'profile_type': transaction['profile_type'],
+                            'pt': transaction['pt'],
+                            'pt_id': transaction['pt_id'],
+                            'pub_key': transaction['pub_key'],
+                            'signature': transaction['signature'],
+                            'sub_type': transaction['sub_type'],
+                            'tags': transaction['tags'],
+                            'type': transaction['type'],
+                            'version': transaction['version']
+                        }
+
+            if cleaned_transaction:
+                transactions.cleaned_transactions.append(cleaned_transaction)
+                logging.info(f"Processed transaction of type {transaction_type} for {sender_address}")
+                return cleaned_transaction
+            else:
+                logging.warning(f"Unhandled or failed transaction type/subtype: {transaction_type}/{sub_tx_type}")
+                return None
+
+        except Exception as e:
+            logging.error(f"Error processing transaction: {e}")
+            return None
+
+    def start_mining(self):
+        self.create_new_block(self.transactions.cleaned_transactions)
+
+    def check_pending_transactions(self):
+        self.clean_and_verify_transactions()
+        self.start_mining()
+
+    def get_latest_block(self):
+        return self.chain[-1]
+
+    def main_loop(self):
+        while True:
+            self.start_mining()
+            self.consume_blocks()
+
+    def consume_blocks(self):
+        for message in self.consumer:
+            block_data = message.value.decode('utf-8')
+            block = json.loads(block_data)
+            self.receive_block(block)
+ 
+class DoubleSpendingError(Exception):
+    def __init__(self, message="Double spending detected"):
+        self.message = message
+        super().__init__(self.message)
+ 
+class Ledger:
+    def __init__(self, coin, wallet, transactions, verifier):
+        self.coin = coin
+        self.wallet = wallet
+        self.transactions = transactions
+        self.verifier = verifier
+
+        self.chain = []
+        self.block_hashes = set()
+        self.lock = threading.Lock()
+        logging.basicConfig(level=logging.DEBUG)
+        
+        self.validators = []
+        
+        mining_thread = threading.Thread(target=self.mine_new_block_periodically)
+        mining_thread.daemon = True
+        mining_thread.start()
+
+    @staticmethod
+    def serialize_and_create_single_hash(cls):
+        if not isinstance(cls, type):
+            raise TypeError(f"Expected class type, got {type(cls)}")
+
+        try:
+            class_dict = {
+                'attributes': {key: value for key, value in cls.__dict__.items() if not callable(value) and not key.startswith('__')},
+                'methods': {
+                    key: (value.__func__.__code__.co_code if isinstance(value, staticmethod) else value.__code__.co_code)
+                    for key, value in cls.__dict__.items() if callable(value)
+                }
+            }
+            class_serialized = json.dumps(class_dict, sort_keys=True, default=str)
+            logging.debug(f"Serialized class {cls.__name__}: {class_serialized}")
+            class_hash = hashlib.sha256(class_serialized.encode()).hexdigest()
+            return class_hash
+        except Exception as e:
+            logging.error(f"Error serializing class {cls.__name__}: {e}")
+            raise
+
+    @staticmethod
+    def verify_class_hashes():
+        """
+        This function retrieves the stored hashes of classes from the public API and compares them
+        with the hashes of the current local classes to ensure integrity.
+        """
+        try:
+            response = requests.get(HASH_API_URL)
+            if response.status_code != 200:
+                raise ValueError("Failed to fetch class hashes from public API.")
+
+            stored_hashes = response.json()
+        except Exception as e:
+            logging.error(f"Error fetching class hashes from public API: {e}")
+            raise
+
+        classes_to_verify = {
+            'coin': OMC,
+            'quantum_utils': QuantumUtils,
+            'transactions': Transactions,
+            'permission_manager': PermissionMngr,
+            'precursor_coin': pOMC,
+            'verifier': Verifier,
+            'crypto_utils': CUtils,
+            'fee_calculator': DynamicFeeCalculator,
+            'ledger': Ledger,
+            'treasury': OMCTreasury
+        }
+
+        for class_name, cls in classes_to_verify.items():
+            stored_hash = stored_hashes.get(class_name)
+            if not stored_hash:
+                logging.error(f"Stored hash for class {class_name} not found in the public API response.")
+                raise ValueError(f"Stored hash for class {class_name} not found.")
+
+            local_hash = Ledger.serialize_and_create_single_hash(cls)
+            if stored_hash != local_hash:
+                logging.error(f"Hash mismatch for class {class_name}. Possible tampering detected.")
+                raise ValueError(f"Hash mismatch for class {class_name}. Possible tampering detected.")
+
+        logging.info("All class hashes verified successfully. No tampering detected.")
+        return True
+
+    def initialize_node(self):
+        service_prefix = "node"
+        services = self.discover_services(service_prefix)
+        if services:
+            self.ping_services(services, "check_nodes", node.url)
+
+        node.steward = os.getenv('STEWARD_ADDRESS')
+        if not node.steward:
+            raise ValueError("Steward address not provided. Set the STEWARD_ADDRESS environment variable.")
+
+        self.update_node_state(node)
+        self.check_chain_length_and_sync(services)
+        self.update_validators()
+        self.broadcast_node_data(node)
+
+    def discover_services(self, prefix):
+        discovered_services = []
+        max_range = 10
+
+        for i in range(1, max_range):
+            service_name = f"{prefix}{i}.omne"
+            try:
+                service_address = socket.gethostbyname(service_name)
+
+                if service_address != node.url:
+                    discovered_services.append(service_name)
+                    logging.debug(f"Discovered service: {service_name}")
+
+            except socket.gaierror:
+                continue
+
+        if not discovered_services:
+            logging.warning("No services were discovered.")
+
+        return discovered_services
+
+    def ping_services(self, services, endpoint, current_node_url):
+        headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/{endpoint}"
+
+            if service_base_url == current_node_url:
+                logging.debug(f"Skipping self ping: {service_base_url}")
+                continue
+
+            logging.debug(f"Attempting to ping {service_url}")
+            try:
+                response = requests.get(service_url, headers=headers)
+                if response.status_code == 200:
+                    logging.debug(f"Successfully pinged {service_url}")
+                    received_nodes = response.json().get('nodes', [])
+                    for received_node in received_nodes:
+                        if not any(node['address'] == received_node['address'] for node in self.verifier.nodes):
+                            verifier.nodes.append(received_node)
+                            verifier.nodes.append(received_node)
+                            self.validators.append(received_node['address'])
+                            logging.debug(f"Added new node: {received_node['address']}")
+                else:
+                    logging.debug(f"Failed to ping {service_url}, status code: {response.status_code}")
+
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error pinging {service_url}: {e}")
+
+    def post_data_to_services(self, services, endpoint, data):
+        headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/{endpoint}"
+
+            if service_base_url == node.url:
+                logging.debug(f"Skipping self post: {service_url}")
+                continue
+
+            logging.debug(f"Attempting to post data to {service_url}")
+            try:
+                response = requests.post(service_url, json=data, headers=headers)
+                if response.status_code == 200:
+                    logging.debug(f"Successfully posted data to {service_url}")
+                else:
+                    logging.debug(f"Failed to post data to {service_url}, status code: {response.status_code}")
+
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error posting data to {service_url}: {e}")
+
+    def broadcast_self_info(self):
+        if not node or not node.address or not node.url:
+            logging.error("Node information is incomplete or incorrect. Cannot broadcast.")
+            return
+
+        node_info = node.to_dict()
+        logging.info(f"Broadcasting self node information: {node_info}")
+
+        services = self.discover_services("node")
+        if not services:
+            logging.warning("No other services discovered for broadcasting. Broadcast aborted.")
+            return
+
+        services = [service for service in services if service != node.url]
+        if not services:
+            logging.warning("No external services discovered for broadcasting. Broadcast aborted.")
+            return
+
+        self.post_data_to_services(services, "receive_node_info", node_info)
+        logging.info("Successfully broadcasted self node information to other services.")
+
+    def update_validators(self):
+        services = self.discover_services("node")
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/node_info"
+
+            if service_base_url == node.url:
+                continue
+
+            try:
+                response = requests.get(service_url)
+                if response.status_code == 200:
+                    node_data = response.json()
+                    if node_data['address'] not in self.validators:
+                        self.validators.append(node_data['address'])
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Failed to retrieve node information from {service}: {e}")
+
+    def sync_with_other_nodes(self, services):
+        my_chain_length = len(self.chain)
+        synchronized_chain = None
+        authoritative_node_url = None
+
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/get_chain"
+
+            if service_base_url == node.url:
+                continue
+
+            try:
+                response = requests.get(service_url)
+                if response.status_code == 200:
+                    other_chain = response.json()["chain"]
+                    if len(other_chain) > my_chain_length:
+                        my_chain_length = len(other_chain)
+                        synchronized_chain = other_chain
+                        authoritative_node_url = service_base_url
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error while trying to sync with {service_url}: {e}")
+
+        if synchronized_chain:
+            self.chain = synchronized_chain
+
+        return authoritative_node_url, synchronized_chain
+
+    def broadcast_node_data(self, node):
+        headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+        node_data_complete = {
+            'address': node.address,
+            'public_key': node.public_key,
+            'url': node.url,
+            'stake_weight': node.stake_weight,
+            'version': node.version,
+            'steward': node.steward
+        }
+
+        services = self.discover_services("node")
+
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+            service_url = f"{service_base_url}/receive_node_data"
+
+            if service_base_url == node.url:
+                continue
+
+            logging.debug(f"Broadcasting node data to {service_url}")
+            try:
+                response = requests.post(service_url, json=node_data_complete, headers=headers)
+                if response.status_code == 201:
+                    logging.debug(f"Successfully broadcasted new node data to {service_url}")
+                elif response.status_code == 200:
+                    logging.debug(f"Node data already exists on {service_url}")
+                else:
+                    logging.warning(f"Failed to broadcast node data to {service_url}, status code: {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error broadcasting node data to {service_url}: {e}")
+                
+    def update_accounts(self, address, balance):
+        new_account = {
+            'address': address,
+            'balance': balance
+        }
+
+        service_prefix = "node"
+        services = self.discover_services(service_prefix)
+
+        filtered_services = [s for s in services if f"http://{s}:3400" != node.url]
+        self.post_data_to_services(filtered_services, "propagate_account", new_account)
+
+    def update_node_state(self, new_node):
+        if new_node not in self.verifier.nodes:
+            verifier.nodes.append(new_node)
+            self.validators.append(new_node.address)
+            logging.info(f"Node {new_node.address} added to local state.")
+
+    def mine_new_block_periodically(self, interval=9):
+        while True:
+            self.check_for_mining_opportunity()
+            time.sleep(interval * 60)
+
+    def check_for_mining_opportunity(self):
+        num_transactions = len(transactions.transactions)
+        if num_transactions >= 1:
+            self.check_pending_transactions()
+        elif 4 <= num_transactions < 15 and self.is_time_to_mine():
+            self.check_pending_transactions()
+
+    def is_time_to_mine(self):
+        latest_block = self.chain[-1]
+        block_timestamp = datetime.strptime(latest_block['timestamp'], "%Y-%m-%d %H:%M:%S.%f%z")
+        current_timestamp = datetime.now(timezone.utc)
+        
+        mining_interval = 9 * 60  # Fixed interval of 9 minutes
+        return (current_timestamp - block_timestamp).total_seconds() >= mining_interval
+
+    def create_new_wallet(self):
+        mnemonic = crypto_utils.generate_mnemonic()
+        account = self.wallet.account_manager.generate_account_from_mnemonic(mnemonic)
+        
+        # Add the new address with a balance of zero to the self.balance dictionary
+        with coin.balance_lock:
+            coin.balance[account['address']] = 0.0
+
+        wallet_creation_transaction = {
+            'address': account['address'],
+            'balance': 0.0,
+            'withdrawals': 0,
+            'type': 'c'
+        }
+
+        cleaned_transaction = {
+            'address': wallet_creation_transaction['address'],
+            'balance': wallet_creation_transaction['balance'],
+            'pub_key': account['pub_key'],
+            'sub_type': 'c',
+            'type': wallet_creation_transaction['type'],
+            'withdrawals': wallet_creation_transaction['withdrawals']
+        }
+
+        initial_balance = 0.0
+
+        account_dict = {
+            'address': wallet_creation_transaction['address'],
+            'balance': initial_balance,
+        }
+
+        sendable_transaction = {
+            'mnemonic': mnemonic,
+            'private_key': base64.b64encode(account['private_key']).decode('utf-8'),
+            'pub_key': account['pub_key'],
+            'address': account['address'],
+        }
+
+        return sendable_transaction
+
+    def create_new_wallet_from_seed(self, seed):
+        account = self.wallet.account_manager.generate_account_from_mnemonic(seed)
+
+        wallet_creation_transaction = {
+            'address': account['address'],
+            'balance': 0.0,
+            'withdrawals': 0,
+            'type': 'c'
+        }
+
+        cleaned_transaction = {
+            'address': wallet_creation_transaction['address'],
+            'balance': wallet_creation_transaction['balance'],
+            'pub_key': account['pub_key'],
+            'type': wallet_creation_transaction['type'],
+            'withdrawals': wallet_creation_transaction['withdrawals']
+        }
+
+        sendable_transaction = {
+            'mnemonic': account['mnemonic'],
+            'private_key': base64.b64encode(account['private_key']).decode('utf-8'),
+            'pub_key': account['pub_key'],
+            'address': account['address'],
+        }
+
+        private_key_bytes = base64.b64decode(sendable_transaction['private_key'])
+        signature = crypto_utils.sign_transaction(private_key_bytes, wallet_creation_transaction)
+
+        cleaned_transaction['signature'] = signature
+
+        self.transactions.transactions.append(cleaned_transaction)
+        self.update_accounts(wallet_creation_transaction['address'], wallet_creation_transaction['balance'])
+
+        return sendable_transaction
+
+    def get_chain_length(self):
+        return len(self.chain) if hasattr(self, "blockchain") else 0
+
+    def check_chain_length_and_sync(self, services):
+        service_prefix = "node"
+        services = self.discover_services(service_prefix)
+
+        authoritative_node_url, synchronized_chain = self.sync_with_other_nodes(services)
+
+        self.sync_account_list_data(authoritative_node_url, account_manager, coin, staked_coin)
+        self.sync_treasury_data(authoritative_node_url)
+
+        self.ping_services(services, "check_nodes", node.url)
+
+        if synchronized_chain is not None:
+            return {
+                "chain": synchronized_chain,
+                "message": "Chain synchronized successfully"
+            }
+        else:
+            return {
+                "chain": self.chain,
+                "message": "Chain synchronization failed"
+            }
+
+    def sync_account_list_data(self, authoritative_node_url, account_manager, coin, staked_coin):
+        if not authoritative_node_url:
+            logging.error("No authoritative node URL provided for account list data synchronization.")
+            return
+
+        service_url = f"{authoritative_node_url}/retrieve_accounts"
+
+        try:
+            response = requests.get(service_url)
+            if response.status_code == 200:
+                data = response.json()
+
+                main_accounts = data.get('data', [])
+                for new_acc in main_accounts:
+                    if 'address' in new_acc and 'balance' in new_acc:
+                        account = next((acc for acc in account_manager.accounts if acc['address'] == new_acc['address']), None)
+                        if account:
+                            account['balance'] = new_acc['balance']
+                            coin.balance[new_acc['address']] = new_acc['balance']
+                            logging.info(f"Updated main account {new_acc['address']} for {coin.name}.")
+                        else:
+                            account_manager.accounts.append(new_acc)
+                            coin.balance[new_acc['address']] = new_acc['balance']
+                            logging.info(f"Added new main account {new_acc['address']} for {coin.name}.")
+
+                precursor_accounts = data.get('precursor_accounts', [])
+                for new_acc in precursor_accounts:
+                    if 'address' in new_acc and 'balance' in new_acc:
+                        account = next((acc for acc in account_manager.precursor_accounts if acc['address'] == new_acc['address']), None)
+                        if account:
+                            account['balance'] = new_acc['balance']
+                            coin.balance[new_acc['address']] = new_acc['balance']
+                            logging.info(f"Updated precursor account {new_acc['address']} for {coin.name}.")
+                        else:
+                            account_manager.precursor_accounts.append(new_acc)
+                            coin.balance[new_acc['address']] = new_acc['balance']
+                            logging.info(f"Added new precursor account {new_acc['address']} for {coin.name}.")
+
+                staking_accounts = data.get('staking_accounts', [])
+                for new_acc in staking_accounts:
+                    if 'address' in new_acc and 'min_term' in new_acc:
+                        account = next((acc for acc in staking_manager.staking_agreements if acc['address'] == new_acc['address']), None)
+                        if account:
+                            account['amount'] = new_acc['amount']
+                            account['withdrawals'] = new_acc['withdrawals']
+                            staked_coin.balance[new_acc['address']] = new_acc['amount']
+                            logging.info(f"Updated staking account {new_acc['address']} for {staked_coin.name}.")
+                        else:
+                            staked_coin.accounts.append(new_acc)
+                            staking_manager.staking_agreements.append(new_acc)
+                            staked_coin.balance[new_acc['address']] = new_acc['amount']
+                            logging.info(f"Added new staking account {new_acc['address']} for {staked_coin.name}.")
+
+                self.validators = data.get('validators', [])
+                if node.address not in self.validators:
+                    self.validators.append(node.address)
+
+                notification_data = {"message": "Data updated from authoritative node"}
+                self.post_data_to_services(self.discover_services("node"), "notify_data_update", notification_data)
+
+                logging.warning(f"Synchronized account list data with the authoritative node: {authoritative_node_url}")
+            else:
+                logging.error(f"Failed to retrieve account data from {service_url}, status code: {response.status_code}")
+        except requests.RequestException as e:
+            logging.error(f"Error retrieving account data from {service_url}: {e}")
+    
+    def sync_treasury_data(self, authoritative_node_url):
+        if not authoritative_node_url:
+            logging.error("No authoritative node URL provided for treasury data synchronization.")
+            return False
+
+        service_url = f"{authoritative_node_url}/retrieve_treasury_data"
+
+        try:
+            response = requests.get(service_url)
+            if response.status_code == 200:
+                response_data = response.json()
+                if 'treasury_address' in response_data:
+                    treasury.update_treasury_data(response_data['treasury_address'])
+                    logging.warning("Synchronized treasury data with the authoritative node: %s", authoritative_node_url)
+                    return True
+                else:
+                    logging.error(f"No treasury account data found in the response from {service_url}")
+                    return False
+            else:
+                logging.error(f"Failed to retrieve treasury data from {service_url}, status code: {response.status_code}")
+                return False
+        except requests.RequestException as e:
+            logging.error(f"Error retrieving treasury data from {service_url}: {e}")
+            return False
+    
+    def add_account(self, account_data):
+        address = account_data.get('address')
+        balance_float = account_data.get('balance_float', 0)
+        new_account = {}
+        new_account['address'] = address
+        new_account['balance'] = balance_float
+
+        account_manager.accounts.append(new_account)
+        coin.balance[address] = balance_float
+
+        logging.info(f"Added/Updated account: {address} with balance {balance_float}")
+
+    def add_staking_account(self, data):
+        account_manager.staking_accounts.append(data)
+        staked_coin.accounts.append(data)
+        staking_manager.staking_accounts.append(data)
+
+    def get_init_date(self):
+        return coin.init_date
+
+    def validate_chain(self, chain):
+        previous_block = chain[0]
+        for block in chain[1:]:
+            if block['previous_hash'] != previous_block['hash']:
+                return False
+
+            block_data = block.copy()
+            block_data.pop('hash')
+            calculated_hash = self.calculate_block_hash(block_data)
+
+            if block['hash'] != calculated_hash:
+                return False
+
+            if not self.validate_stake(block):
+                return False
+
+            previous_block = block
+
+        return True
+
+    def add_block(self, block):
+        logging.info(f"Attempting to add block with index {block['index']}")
+        if self.validate_received_block(block):
+            with self.lock:
+                if block['index'] == len(self.chain) + 1 and \
+                   block['previous_hash'] == self.chain[-1]['hash']:
+                    self.chain.append(block)
+                    self.block_hashes.add(block['hash'])
+                    logging.info(f"Block with index {block['index']} successfully added to the chain.")
+                    self.broadcast_block(block)
+                    return True
+                else:
+                    logging.warning(f"Block with index {block['index']} failed to match chain continuity.")
+        else:
+            logging.warning(f"Block with index {block['index']} failed validation.")
+        return False
+    
+    def broadcast_block(self, new_block):
+        block_data = json.dumps(new_block)
+
+        service_prefix = "node"
+        services = self.discover_services(service_prefix)
+
+        self.post_data_to_services(services, "blocks/receive_block", block_data)
+        
+    def validate_foreign_tx(self, address, hash, pub_key, tx, signature):
+        logging.debug(f"Validating tx from {address}")
+
+        tx_hash = quantum_utils.quantum_resistant_hash(json.dumps(tx, sort_keys=True))
+        if tx_hash != hash:
+            logging.error(f"Hash mismatch for transaction with hash: {hash}")
+            return None
+
+        if not CUtils.verify_transaction(pub_key, tx, signature):
+            logging.error(f"Invalid signature in foreign transaction with hash: {hash} from address: {address}")
+            return None
+
+        return True
+
+    def vote_on_local_tx(self, address, hash, pub_key, tx, signature):
+        valid_votes = []
+        services = ledger.discover_services("node")
+
+        if len(services) == 1 and services[0] == node.url:
+            logging.info("Only one validator in the network, bypassing the voting process.")
+            valid_votes.append(node.url)
+
+        filtered_services = [s for s in services if f"http://{s}:3400" != node.url]
+        for service in filtered_services:
+            service_url = f"http://{service}:3400/vote_on_tx"
+
+            try:
+                data = {
+                    'address': address,
+                    'hash': hash,
+                    'pub_key': pub_key,
+                    'new_tx': tx,
+                    'signature': signature
+                }
+                response = requests.post(service_url, json=data)
+                if response.status_code == 200 and response.json().get('message') == 'Tx is valid':
+                    valid_votes.append(service)
+                    logging.info(f"Validator {service} approved the tx.")
+                else:
+                    logging.info(f"Validator {service} did not approve the tx.")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error voting on block with {service}: {e}")
+
+        return valid_votes
+
+    def reach_tx_consensus(self, address, hash, pub_key, tx, signature):
+        if len(self.validators) == 1:
+            logging.info("Automatically reaching consensus with single validator")
+            return True
+
+        consensus_reached = self.vote_on_local_tx(address, hash, pub_key, tx, signature)
+
+        if consensus_reached:
+            logging.info("Tx consensus reached")
+            return True
+        else:
+            logging.info("Tx consensus not reached")
+            return False
+
+    def receive_tx(self, address, hash, pub_key, tx, signature):
+        try:
+            if not self.validate_foreign_tx(address, hash, pub_key, tx, signature):
+                logging.error(f"Received transaction, with hash {hash} from wallet {address}, did not pass verification")
+                return False
+
+            return True
+        except Exception as e:
+            logging.error(f"Error processing received transaction: {str(e)}")
+            return False
+
+    def receive_block(self, block):
+        try:
+            services = ledger.discover_services("node")
+            authoritative_node_url, _ = ledger.sync_with_other_nodes(services)
+
+            if authoritative_node_url:
+                ledger.sync_account_list_data(authoritative_node_url, account_manager, coin, staked_coin)
+                ledger.sync_treasury_data(authoritative_node_url)
+
+            return True
+        except Exception as e:
+            logging.error(f"Error processing received block: {str(e)}")
+            return False
+
+    def broadcast_tx(self, address, hash, pub_key, new_tx, signature):
+        data = {
+            'address': address,
+            'hash': hash,
+            'pub_key': pub_key,
+            'new_tx': new_tx,
+            'signature': signature
+        }
+
+        services = ledger.discover_services("node")
+
+        ledger.post_data_to_services(services, "transaction/receive_tx", data)
+
+        return True
+    
+    def randomly_select_validator(self):
+        if not self.validators:
+            logging.warning("No validators available.")
+            return None
+
+        try:
+            if len(self.validators) == 1:
+                validator_address = self.validators[0]
+                logging.info(f"Only one validator available. Selected validator address: {validator_address}")
+                return validator_address
+
+            max_value = len(self.validators) - 1
+            random_bytes = QuantumUtils.quantum_random_bytes((max_value.bit_length() + 7) // 8)
+            random_int = int.from_bytes(random_bytes, 'big') % (max_value + 1)
+            validator_address = self.validators[random_int]
+            logging.info(f"Randomly selected validator address: {validator_address}")
+            return validator_address
+        except Exception as e:
+            logging.error(f"Error generating random index: {e}")
+            return None
+
+    def trigger_sync_on_all_nodes(self):
+        services = ledger.discover_services("node")
+
+        data = {}
+
+        for service in services:
+            service_base_url = f"http://{service}:3400"
+
+            if service_base_url == node.url:
+                logging.debug(f"Skipping self sync trigger: {service_base_url}")
+                continue
+
+            service_url = f"{service_base_url}/trigger_sync"
+            logging.debug(f"Attempting to trigger sync on {service_url}")
+            try:
+                response = requests.post(service_url, json=data)
+                if response.status_code == 200:
+                    logging.debug(f"Successfully triggered sync on {service_url}")
+                else:
+                    logging.debug(f"Failed to trigger sync on {service_url}, status code: {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error triggering sync on {service_url}: {e}")
+
+    def validate_received_block(self, block):
+        logging.debug(f"Validating received block with index {block['index']}")
+        if not self.validate_block_structure(block):
+            logging.error("Block structure validation failed.")
+            return False
+
+        if not self.validate_block(block):
+            logging.error("Block content validation failed.")
+            return False
+
+        if block['index'] != len(self.chain) + 1:
+            logging.error(f"Block index {block['index']} does not follow the current chain length.")
+            return False
+
+        return True
+
+    def validate_block_structure(self, block):
+        logging.debug(f"Checking block structure for block with index {block['index']}")
+        required_fields = [
+            'index', 'previous_hash', 'timestamp', 'transactions',
+            'merkle_root', 'stake_threshold', 'hash', 'miner', 'miner_share',
+            'validator', 'validator_share', 'fee'
+        ]
+
+        missing_fields = [field for field in required_fields if field not in block]
+        if missing_fields:
+            logging.error(f"Block missing required fields: {missing_fields}")
+            return False
+
+        field_type_issues = False
+        for field in required_fields:
+            if field in block:
+                expected_type = (int if field in ['index', 'timestamp'] else
+                                 str if field in ['previous_hash', 'hash', 'miner', 'validator', 'merkle_root'] else
+                                 list if field == 'transactions' else
+                                 (int, float) if field in ['stake_threshold', 'fee', 'miner_share', 'validator_share'] else
+                                 None)
+                actual_type = type(block[field])
+                if not isinstance(block[field], expected_type):
+                    logging.error(f"Field '{field}' type mismatch: expected {expected_type}, got {actual_type}")
+                    field_type_issues = True
+            else:
+                logging.error(f"Field '{field}' is missing from the block.")
+                field_type_issues = True
+
+        if field_type_issues:
+            logging.error("One or more block field types are incorrect.")
+            return False
+
+        logging.debug("Block structure validated successfully.")
+        return True
+    
+    def reach_consensus(self, proposed_block):
+        if len(self.validators) == 1:
+            logging.info("Automatically reaching consensus with single validator")
+            return True
+
+        consensus_reached = self.vote_on_local_block(proposed_block)
+
+        if consensus_reached:
+            logging.info("Consensus reached")
+            return True
+        else:
+            logging.info("Consensus not reached")
+            return False
+
+    def vote_on_local_block(self, block):
+        valid_votes = []
+        services = self.discover_services("node")
+
+        if len(services) == 1 and services[0] == node.url:
+            logging.info("Only one validator in the network, bypassing the voting process.")
+            valid_votes.append(node.url)
+
+        filtered_services = [s for s in services if f"http://{s}:3400" != node.url]
+        for service in filtered_services:
+            service_url = f"http://{service}:3400/vote_on_block"
+
+            try:
+                response = requests.post(service_url, json=block)
+                if response.status_code == 200 and response.json().get('message') == 'Block is valid':
+                    valid_votes.append(service)
+                    logging.info(f"Validator {service} approved the block.")
+                else:
+                    logging.info(f"Validator {service} did not approve the block.")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Error voting on block with {service}: {e}")
+
+        return valid_votes
+
+    def validate_block(self, block):
+        logging.debug(f"Validating block with index {block['index']}")
+        if block['validator'] not in self.validators:
+            logging.error("Block validator is not recognized.")
+            return False
+
+        if not self.proof_of_stake(block):
+            return False
+
+        unique_addresses = set()
+        double_spent_addresses = set()
+        for transaction in block['transactions']:
+            sender_address = transaction.get('address')
+            if sender_address in unique_addresses:
+                double_spent_addresses.add(sender_address)
+            unique_addresses.add(sender_address)
+
+        if double_spent_addresses:
+            logging.error(f"Double spending detected for addresses: {', '.join(double_spent_addresses)}")
+            raise DoubleSpendingError("Double spending detected for addresses: " + ', '.join(double_spent_addresses))
+
+        block_string = str(block['index']) + str(block['timestamp']) + str(block['previous_hash']) + str(
+            block['transactions']) + str(block['fee']) + str(block['validator']) + str(block['validator_share'])
+
+        generated_hash = hashlib.sha256(block_string.encode()).hexdigest()
+        if block['hash'] != generated_hash:
+            logging.error("Block hash does not match the generated hash.")
+            return False
+
+        if not self.reach_consensus(block):
+            logging.error("Failed to reach consensus.")
+            return False
+
+        logging.info(f"Block with index {block['index']} passed all validations.")
+        return True
+
+    def validate_foreign_block(self, block):
+        logging.debug(f"Validating block with index {block['index']}")
+        if block['validator'] not in self.validators:
+            logging.error("Block validator is not recognized.")
+            return False
+
+        if not self.proof_of_stake(block):
+            return False
+
+        unique_addresses = set()
+        double_spent_addresses = set()
+        for transaction in block['transactions']:
+            sender_address = transaction.get('address')
+            if sender_address in unique_addresses:
+                double_spent_addresses.add(sender_address)
+            unique_addresses.add(sender_address)
+
+        if double_spent_addresses:
+            logging.error(f"Double spending detected for addresses: {', '.join(double_spent_addresses)}")
+            raise DoubleSpendingError("Double spending detected for addresses: " + ', '.join(double_spent_addresses))
+
+        block_string = str(block['index']) + str(block['timestamp']) + str(block['previous_hash']) + str(
+            block['transactions']) + str(block['fee']) + str(block['validator']) + str(block['validator_share'])
+
+        generated_hash = hashlib.sha256(block_string.encode()).hexdigest()
+        if block['hash'] != generated_hash:
+            logging.error("Block hash does not match the generated hash.")
+            return False
+
+        return True
+
+    def generate_block_hash(self, block):
+        transactions_string = json.dumps(block['transactions'], sort_keys=True)
+
+        block_contents = (
+            str(block['index']) +
+            str(block['timestamp']) +
+            str(block['previous_hash']) +
+            transactions_string +
+            str(block['fee']) +
+            str(block['miner']) +
+            str(block['miner_share']) +
+            str(block['validator']) +
+            str(block['validator_share'])
+        )
+
+        block_hash = hashlib.sha256(block_contents.encode()).hexdigest()
+        return block_hash
+    
+    def proof_of_stake(self, block):
+        logging.info("Starting proof of stake validation.")
+
+        total_stake_weight = sum(node['stake_weight'] if isinstance(node, dict) else node.stake_weight for node in self.verifier.nodes)
+        random_number = random.uniform(0, total_stake_weight)
+        cumulative_stake_weight = 0
+
+        logging.info(f"Total stake weight: {total_stake_weight}, Random number for validator selection: {random_number}")
+
+        for current_node in self.verifier.nodes:
+            node_stake_weight = current_node['stake_weight'] if isinstance(current_node, dict) else current_node.stake_weight
+            cumulative_stake_weight += node_stake_weight
+
+            if cumulative_stake_weight > random_number:
+                selected_validator_address = current_node['address'] if isinstance(current_node, dict) else current_node.address
+                logging.info(f"Selected validator address: {selected_validator_address}, Stake weight: {node_stake_weight}")
+
+                if selected_validator_address == block['validator']:
+                    logging.info(f"Validator {selected_validator_address} matches the block's validator.")
+                    if node_stake_weight >= block['stake_threshold']:
+                        logging.info(f"Validator {selected_validator_address} meets the stake threshold.")
+                        return node_stake_weight
+                    else:
+                        logging.error(f"Validator {selected_validator_address} does not meet the stake threshold.")
+                        return 0
+
+        logging.error("No suitable validator found or the selected validator does not meet the stake threshold.")
+        return 0
+
+    def add_coin_transaction(self, address: str, amount: int, converted_amount: Union[int, float], fee: Union[int, float], hash: str, pub_key: str, signature: str, sub_type: str, type: str) -> Union[bool, str]:
+
+        cleaned_transaction = {
+            'address': address,
+            'amount': amount,
+            'converted_amount': converted_amount,
+            'fee': fee,
+            'hash': hash,
+            'pub_key': pub_key,
+            'signature': signature,
+            'sub_type': sub_type,
+            'type': type
+        }
+
+        if cleaned_transaction['signature']:
+            return cleaned_transaction
+        
+    def select_miner(self) -> dict:
+        accounts = staking_manager.staking_agreements
+
+        # If no accounts are available, return None
+        if not accounts:
+            logging.warning("No staking accounts available for miner selection.")
+            return None
+
+        # Calculate the number of withdrawals for each account
+        for account in accounts:
+            account['withdrawals'] = sum(1 for block in self.chain for transaction in block['transactions']
+                                        if 'address' in transaction and transaction.get('address') == account['address'])
+
+        # Select the miner based on weighted selection
+        miner = self.weighted_selection(accounts)
+        return miner
+
+    def weighted_selection(self, accounts: List[dict]) -> dict:
+        # Calculate weights based on the number of withdrawals for each account
+        weights = [1 / (acc['withdrawals'] + 1) for acc in accounts]
+        total_weight = sum(weights)
+
+        # Normalize the weights to ensure their sum is 1
+        normalized_weights = [weight / total_weight for weight in weights]
+
+        # Select an account using the normalized weights
+        chosen_account = random.choices(
+            accounts, weights=normalized_weights, k=1)[0]
+        return chosen_account
+
+    def calculate_fee_distribution(self, total_fee):
+        fee_distribution = {}
+
+        validator_percentage = 0.45
+        miner_percentage = 0.315
+        treasury_percentage = 0.235  # Updated to include the burn percentage
+
+        fee_distribution['validator_share'] = total_fee * validator_percentage
+        fee_distribution['miner_share'] = total_fee * miner_percentage
+        fee_distribution['treasury_share'] = total_fee * treasury_percentage
+
+        return fee_distribution
+    
+    def select_validator(self, block):
+        selected_validator = self.verifier.select_validator(block)
+        return selected_validator if selected_validator else None
+
+    def validate_selected_validator(self, selected_validator, block):
+        if selected_validator.malicious or selected_validator not in verifier.nodes:
+            return False
+
+        if selected_validator.address == block['validator'] and \
+                selected_validator.stake_weight >= block['stake_threshold']:
+            return True
+
+        return False
+
+    def add_malicious_validator(self, validator_address):
+        for node in verifier.nodes:
+            if node.address == validator_address:
+                node.malicious = True
+                break
+
+    def create_new_block(self, transactions):
+        latest_block = self.chain[-1]
+        block_index = latest_block['index'] + 1
+        timestamp = int(datetime.now(timezone.utc).timestamp())
+        previous_hash = latest_block['hash']
+        stake_threshold = node.stake_weight
+
+        processed_transactions, total_fee = self.process_transactions(transactions)
+        block_fee = self.coin.mint_for_block_fee(total_fee)
+        fee_distribution = self.calculate_fee_distribution(block_fee)
+        miner = self.select_miner()
+
+        if miner is None:
+            logging.error("Failed to select a miner. Aborting block creation.")
+            return
+
+        miner_address = miner['address']
+
+        block = {
+            'index': block_index,
+            'timestamp': timestamp,
+            'previous_hash': previous_hash,
+            'transactions': processed_transactions,
+            'stake_threshold': stake_threshold,
+            'fee': block_fee
+        }
+
+        validator_node = self.select_validator(block)
+        if validator_node:
+            validator_address = validator_node['address'] if isinstance(validator_node, dict) else getattr(validator_node, 'address', node.address)
+        else:
+            validator_address = node.address
+
+        for transaction in transactions:
+            merkle_tree.add_transaction(str(transaction))
+
+        merkle_tree.create_tree()
+        merkle_root = merkle_tree.get_merkle_root()
+
+        self.coin.credit(validator_address, fee_distribution['validator_share'])
+        self.coin.credit(miner_address, fee_distribution['miner_share'])
+        self.coin.credit(self.coin.treasury_address, fee_distribution['treasury_share'])
+
+        new_block = {
+            'index': block_index,
+            'timestamp': timestamp,
+            'previous_hash': previous_hash,
+            'transactions': processed_transactions,
+            'merkle_root': merkle_root,
+            'stake_threshold': stake_threshold,
+            'fee': block_fee,
+            'miner': miner_address,
+            'miner_share': fee_distribution['miner_share'],
+            'validator': validator_address,
+            'validator_share': fee_distribution['validator_share'],
+            'treasury_share': fee_distribution['treasury_share']
+        }
+
+        logging.info(f"constructed block: {new_block}")
+
+        block_string = str(new_block['index']) + str(new_block['timestamp']) + str(new_block['previous_hash']) + str(
+            new_block['transactions']) + str(new_block['fee']) + str(new_block['validator']) + str(new_block['validator_share'])
+
+        # Generate block hash
+        block_hash = hashlib.sha256(block_string.encode()).hexdigest()
+
+        new_block['hash'] = block_hash
+
+        if self.add_block(new_block):
+            self.transactions.cleaned_transactions = []
+            logging.info(f"Successfully mined new block: {new_block}")
+            return new_block
+        else:
+            logging.debug(f"Issue mining block: {new_block}")
+
+    def process_transactions(self, transactions):
+        processed_transactions = []
+        total_fee = 0.0
+
+        for transaction in transactions:
+            transaction_type = transaction.get('sub_type')
+
+            if transaction_type == 'r':
+                processed_transaction = self.handle_staking_transaction(transaction)
+            elif transaction_type == 'o':
+                processed_transaction = self.handle_unstaking_transaction(transaction)
+            elif transaction_type == 'k':
+                processed_transaction = self.handle_transfer_transaction(transaction)
+            elif transaction_type == 'w':
+                processed_transaction = self.handle_pomc_whitelist_transaction(transaction)
+            elif transaction_type in ['h', 'x', 'm', 'pr']:
+                processed_transaction = self.handle_fee_payment_transaction(transaction)
+            else:
+                processed_transaction = self.handle_default_transaction(transaction)
+
+            if processed_transaction:
+                processed_transactions.append(processed_transaction)
+                total_fee += processed_transaction.get('fee', 0.0)
+
+        return processed_transactions, total_fee
+
+    def handle_staking_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            sender_address = transaction['address']
+            staking_amount = transaction['amount']
+            min_term = transaction['min_term']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            transaction_data = {
+                'address': sender_address,
+                'amount': staking_amount,
+                'min_term': min_term,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            transaction_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            if not all([sender_address, staking_amount, min_term, pub_key, signature]):
+                logging.error("Missing fields in staking transaction")
+                return None
+
+            sender_balance_info = self.wallet.get_account_balance(sender_address)
+            if not sender_balance_info or sender_balance_info['balance_float'] < staking_amount + transaction_fee:
+                logging.error("Insufficient balance for staking")
+                return None
+
+            transaction_for_verification = {
+                'address': sender_address,
+                'amount': staking_amount,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'min_term': min_term,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            if not crypto_utils.verify_transaction(transaction['pub_key'], transaction_for_verification, transaction['signature']):
+                logging.error("Invalid signature in staking transaction")
+                return None
+
+            self.wallet.stake_coins(sender_address, staking_amount, min_term)
+
+            processed_transaction = {
+                'address': sender_address,
+                'amount': staking_amount,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'min_term': min_term,
+                'stake_threshold': 3,
+                'type': transaction['type'],
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed staking transaction for {sender_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing staking transaction: {e}")
+            return None
+
+    def handle_unstaking_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            sender_address = transaction['address']
+            contract_id = transaction['contract_id']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            transaction_data = {
+                'address': sender_address,
+                'contract_id': contract_id,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            transaction_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            if not all([sender_address, contract_id, pub_key, signature]):
+                logging.error("Missing fields in unstaking transaction")
+                return None
+
+            sender_balance_info = self.wallet.get_account_balance(sender_address)
+            if not sender_balance_info or sender_balance_info['balance_float'] < transaction_fee:
+                logging.error("Insufficient balance for unstaking")
+                return None
+
+            transaction_for_verification = {
+                'address': sender_address,
+                'contract_id': contract_id,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            if not crypto_utils.verify_transaction(transaction['pub_key'], transaction_for_verification, transaction['signature']):
+                logging.error("Invalid signature in unstaking transaction")
+                return None
+
+            self.wallet.unstake_coins(sender_address, contract_id)
+
+            processed_transaction = {
+                'address': sender_address,
+                'contract_id': contract_id,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'stake_threshold': 2,
+                'type': transaction['type'],
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed unstaking transaction for {sender_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing unstaking transaction: {e}")
+            return None
+
+    def handle_transfer_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            sender_address = transaction['sender']
+            recipient_address = transaction['recipient']
+            transfer_amount = transaction['amount']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            transaction_data = {
+                'sender': sender_address,
+                'recipient': recipient_address,
+                'amount': transfer_amount,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            transaction_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            if not all([sender_address, recipient_address, transfer_amount, pub_key, signature]):
+                logging.error("Missing fields in transfer transaction")
+                return None
+
+            sender_balance_info = self.wallet.get_account_balance(sender_address)
+            if not sender_balance_info or sender_balance_info['balance_float'] < transfer_amount + transaction_fee:
+                logging.error("Insufficient balance for transfer")
+                return None
+
+            transaction_for_verification = {
+                'sender': sender_address,
+                'recipient': recipient_address,
+                'amount': transfer_amount,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            if not crypto_utils.verify_transaction(transaction['pub_key'], transaction_for_verification, transaction['signature']):
+                logging.error("Invalid signature in transfer transaction")
+                return None
+
+            self.wallet.transfer(sender_address, recipient_address, transfer_amount)
+
+            processed_transaction = {
+                'sender': sender_address,
+                'recipient': recipient_address,
+                'amount': transfer_amount,
+                'fee': transaction_fee,
+                'hash': transaction_hash,
+                'stake_threshold': 2,
+                'type': transaction['type'],
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed transfer transaction from {sender_address} to {recipient_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing transfer transaction: {e}")
+            return None
+    
+    def handle_pomc_whitelist_transaction(self, transaction):
+        try:
+            
+            sender_address = transaction['sender']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            processed_transaction = {
+                'fee': transaction['fee'],
+                'hash': transaction['hash'],
+                'sender': transaction['sender'],
+                'sub_type': transaction['sub_type'],
+                'stake_threshold': 2,
+                'type': transaction['type'],
+                'when': transaction['when']
+            }
+
+            logging.info(f"Processed transfer transaction from {sender_address} to join pOMC whitelist")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing transfer transaction: {e}")
+            return None
+
+    def handle_fee_payment_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            payer_address = transaction['from']
+            fee_amount = transaction['fee']
+            pub_key = transaction['pub_key']
+            signature = transaction.get('signature')
+
+            transaction_data = {
+                'from': payer_address,
+                'fee': fee_amount,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            calculated_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            if not all([payer_address, fee_amount, pub_key, signature]):
+                logging.error("Missing fields in fee payment transaction")
+                return None
+
+            payer_balance_info = self.wallet.get_account_balance(payer_address)
+            if not payer_balance_info or payer_balance_info['balance_float'] < fee_amount + calculated_fee:
+                logging.error("Insufficient balance for fee payment")
+                return None
+
+            transaction_for_verification = {
+                'from': payer_address,
+                'fee': calculated_fee,
+                'hash': transaction_hash,
+                'pub_key': pub_key,
+                'type': transaction['type']
+            }
+
+            if not crypto_utils.verify_transaction(transaction['pub_key'], transaction_for_verification, transaction['signature']):
+                logging.error("Invalid signature in fee payment transaction")
+                return None
+
+            self.wallet.pay_fee(payer_address, fee_amount)
+
+            processed_transaction = {
+                'from': payer_address,
+                'fee': calculated_fee,
+                'hash': transaction_hash,
+                'stake_threshold': 2,
+                'type': transaction['type'],
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed fee payment transaction from {payer_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing fee payment transaction A1: {e}")
+            return None
+
+    def handle_default_transaction(self, transaction):
+        try:
+            fee_calculator = DynamicFeeCalculator()
+            payer_address = transaction['address']
+
+            transaction_data = {
+                'from': payer_address,
+                'type': 'e'
+            }
+
+            calculated_fee, transaction_hash = dynamic_fee_calculator.get_base_dynamic_fee(transaction_data, transaction['type'])
+
+            processed_transaction = {
+                'from': payer_address,
+                'fee': 0.0,
+                'hash': transaction_hash,
+                'stake_threshold': 1,
+                'type': 'e',
+                'when': str(datetime.now(timezone.utc))
+            }
+
+            logging.info(f"Processed fee payment transaction from {payer_address}")
+            return processed_transaction
+
+        except Exception as e:
+            logging.error(f"Error processing fee payment transaction A2: {e}")
+            return None
+
+    def clean_and_verify_transactions(self):
+        new_transactions = self.transactions.batch_pending_transactions()
+        cleaned_transactions = []
+
+        for transaction in new_transactions:
+            try:
+                if transaction['type'] == 'c' and transaction['sub_type'] == 'c':
+                    self.process_account_creation_transaction(transaction)
+                elif transaction['type'] == 'c' and transaction['sub_type'] == 'w':
+                    self.process_add_account_to_whitelist_transaction(transaction)
+                elif transaction['type'] == 'o':
+                    self.process_non_f_transaction(transaction)
+                elif transaction['type'] == 'e':
+                    self.process_f_transaction(transaction)
+            except Exception as e:
+                logging.error(f"Error processing transaction {transaction['type']}: {e}")
+
+        return cleaned_transactions
+    
+    def process_account_creation_transaction(self, transaction):
+        # Verify that the transaction is of the correct type
+        if transaction['type'] != 'c':
+            logging.error(f"Invalid transaction type for account creation: {transaction['type']}")
+            return
+
+        try:
+            # Extract necessary fields from the transaction
+            address = transaction['address']
+            balance = transaction['balance']
+            type = transaction['type']
+            timestamp = ['timestamp']
+            withdrawals = transaction['withdrawals']
+
+            # Validate the transaction data
+            if not all([address, type]):
+                logging.error("Incomplete account creation transaction data")
+                return
+
+            # Check if the address already exists in the blockchain wallet
+            # if any(acc['address'] == address for acc in account_manager.accounts):
+            #     logging.info(f"Account already exists: {address}")
+            #     return
+
+            # # Create and append the new account to the wallet
+            # new_account = {
+            #     'address': address,
+            #     'balance': balance,
+            #     'withdrawals': withdrawals
+            # }
+            # account_manager.accounts.append(new_account)
+
+            # Create a cleaned version of the transaction for the blockchain
+            cleaned_transaction = {
+                'address': address,
+                'hash': transaction.get('hash'),
+                'pub_key': transaction['pub_key'],
+                'signature': transaction['signature'],
+                'sub_type': 'c',
+                'type': transaction['type'],
+                'withdrawals': withdrawals
+            }
+
+            # Append the cleaned transaction to the list of processed transactions
+            self.transactions.cleaned_transactions.append(cleaned_transaction)
+            logging.info(f"Processed account creation transaction for {address}")
+
+        except Exception as e:
+            logging.error(f"Error processing account creation transaction A2: {e}")
+            
+    def process_add_account_to_whitelist_transaction(self, transaction):
+        # Verify that the transaction is of the correct type
+        if transaction['type'] != 'c':
+            logging.error(f"Invalid transaction type to add account to whitelist: {transaction['type']}")
+            return
+
+        try:
+            result = {
+                'fee': transaction['fee'],
+                'hash': transaction['hash'],
+                'pub_key': transaction['pub_key'],
+                'sender': transaction['sender'],
+                'signature': transaction['signature'],
+                'sub_type': transaction['sub_type'],
+                'type': transaction['type'],
+                'when': transaction['when']
+            }
+            # Extract necessary fields from the transaction
+            address = transaction['sender']
+            hash = transaction['hash']
+            type = transaction['type']
+
+            # Validate the transaction data
+            if not all([address, hash, type]):
+                logging.error("Incomplete account creation transaction data")
+                return
+
+            # Create a cleaned version of the transaction for the blockchain
+            cleaned_transaction = {
+                'fee': transaction['fee'],
+                'hash': transaction['hash'],
+                'pub_key': transaction['pub_key'],
+                'sender': transaction['sender'],
+                'signature': transaction['signature'],
+                'sub_type': transaction['sub_type'],
+                'type': transaction['type'],
+                'when': transaction['when']
+            }
+
+            # Append the cleaned transaction to the list of processed transactions
+            self.transactions.cleaned_transactions.append(cleaned_transaction)
+            logging.info(f"Processed join whitelist transaction for {address}")
+
+        except Exception as e:
+            logging.error(f"Error processing join whiteist transaction A2: {e}")
+
+    def process_f_transaction(self, transaction):
+        try:
+            transaction_type = transaction.get('type')
+            sender_address = transaction.get('address')
+            transaction_fee = transaction.get('fee', 0.0)
+
+            if not sender_address or transaction_fee is None:
+                logging.error("Invalid transaction format.")
+                return None
+
+            cleaned_transaction = None
+
+            if transaction_type == 'e':
+                sub_tx_type = transaction.get('sub_type')
+
+                if sub_tx_type == 'p':
+                    amount = transaction.get('amount')
+                    recipient_address = transaction.get('recipient')
+
+                    if crypto_utils.verify_transaction(sender_address, recipient_address, amount):
+                        self.wallet.transfer(sender_address, recipient_address, amount)
+
+                elif sub_tx_type == 'r':
+                    amount = transaction.get('amount')
+                    min_term = transaction.get('min_term')
+
+                    self.wallet.stake_coins(sender_address, amount, min_term)
+
+                elif sub_tx_type == 'z':
+                    contract_id = transaction.get('contract_id')
+
+                    self.wallet.unstake_coins(sender_address, contract_id)
+
+            if cleaned_transaction:
+                self.transactions.cleaned_transactions.append(cleaned_transaction)
+                logging.info(f"Processed transaction of type {transaction_type} for {sender_address}")
+                return cleaned_transaction
+            else:
+                logging.warning(f"Unhandled or failed transaction type/subtype: {transaction_type}/{sub_tx_type}")
+                return None
+
+        except Exception as e:
+            logging.error(f"Error processing account creation transaction A2: {e}")
+
+    def process_non_f_transaction(self, transaction):
+        try:
+            transaction_type = transaction.get('type')
+            sender_address = transaction.get('address')
+            transaction_fee = transaction.get('fee', 0.0)
+
+            if not sender_address or transaction_fee is None:
+                logging.error("Invalid transaction format.")
+                return None
+
+            cleaned_transaction = None
+
+            if transaction_type == 'o':
+                sub_tx_type = transaction.get('sub_type')
+
+                if sub_tx_type == 's':
+                    self.handle_post_transaction(transaction)
+
+                elif sub_tx_type == 'j':
+                    refined_transaction = self.handle_add_profile_transaction(transaction)
+                    if refined_transaction:
+                        cleaned_transaction = {
+                            'address': transaction['address'],
+                            'avi': transaction['avi'],
+                            'clubs': transaction['clubs'],
+                            'fee': transaction['fee'],
+                            'handle': transaction['handle'],
+                            'hash': transaction['hash'],
+                            'intro': transaction['intro'],
+                            'joined': transaction['joined'],
+                            'name': transaction['name'],
+                            'profile_id': transaction['profile_id'],
+                            'profile_type': transaction['profile_type'],
+                            'pt': transaction['pt'],
+                            'pt_id': transaction['pt_id'],
+                            'pub_key': transaction['pub_key'],
+                            'signature': transaction['signature'],
+                            'sub_type': transaction['sub_type'],
+                            'tags': transaction['tags'],
+                            'type': transaction['type'],
+                            'version': transaction['version']
+                        }
+
+            if cleaned_transaction:
+                transactions.cleaned_transactions.append(cleaned_transaction)
+                logging.info(f"Processed transaction of type {transaction_type} for {sender_address}")
+                return cleaned_transaction
+            else:
+                logging.warning(f"Unhandled or failed transaction type/subtype: {transaction_type}/{sub_tx_type}")
+                return None
+
+        except Exception as e:
+            logging.error(f"Error processing transaction: {e}")
+            return None
+
+    def start_mining(self):
+        self.create_new_block(self.transactions.cleaned_transactions)
+
+    def check_pending_transactions(self):
+        self.clean_and_verify_transactions()
+        self.start_mining()
+
+    def get_latest_block(self):
+        return self.chain[-1]
+
+    def main_loop(self):
+        while True:
+            self.start_mining()
+            self.consume_blocks()
+
+    def consume_blocks(self):
+        for message in self.consumer:
+            block_data = message.value.decode('utf-8')
+            block = json.loads(block_data)
+            self.receive_block(block)
         
 ## Creating a Web App
 app = Flask(__name__)
@@ -2678,6 +9506,9 @@ permission_manager = PermissionMngr()
 # Initialize the OMC class
 coin = OMC()
 
+#Initialize the pOMC class
+precursor_coin = pOMC()
+
 account_manager = AccMngr()
 
 # Staked coin
@@ -2690,14 +9521,10 @@ wallet = Wallet()
 
 node = Node()
 
-treasury = OMCTreasury()
+staked_coin.treasury_account = coin.treasury_address
+coin.treasury_account = coin.treasury_address
 
-staked_coin.treasury_account = treasury.treasury_account
-coin.treasury_account = treasury.treasury_account
-
-ledger = Ledger(coin, node, wallet, transactions, coin, verifier)
-
-swrvs = SWRVS(node, verifier)
+ledger = Ledger(coin, node, wallet, transactions, verifier)
 
 def require_authentication(func):
     """
@@ -2718,6 +9545,18 @@ def require_authentication(func):
             return jsonify({"error": "Unauthorized"}), 401
         return func(*args, **kwargs)
     return wrapper
+
+@app.route('/endpoints', methods=['GET'])
+def get_endpoints():
+    output = []
+    for rule in app.url_map.iter_rules():
+        if rule.endpoint != 'endpoints':
+            output.append(rule.rule)
+    return jsonify(output)
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "healthy"}), 200
 
 @app.route('/trigger_sync', methods=['POST'])
 @require_authentication
@@ -2936,6 +9775,12 @@ def decrypt_data(encrypted_data, private_key_path):
 
     return decrypted_data
 
+# Retrieve NonIterableList data
+@app.route('/get_account_list_data', methods=['GET'])
+def get_account_list_data():
+    account_list_data = account_manager.accounts
+    return jsonify({"account_list_data": account_list_data}), 200
+
 # Retrieve accounts
 @app.route('/retrieve_accounts', methods=['GET'])
 def retrieve_accounts():
@@ -2947,7 +9792,7 @@ def retrieve_accounts():
 
         # Convert nodes to dictionaries; handle both Node objects and already dictionary nodes
         nodes = []
-        for node in ledger.nodes:
+        for node in verifier.nodes:
             if isinstance(node, Node):
                 nodes.append(node.to_dict())  # Convert Node object to dictionary using a method
             elif isinstance(node, dict):
@@ -2982,7 +9827,7 @@ def get_chain():
 @require_authentication
 def check_validators():
     # Extracting the address attribute from each node
-    node_addresses = [node.address for node in ledger.nodes]
+    node_addresses = [node.address for node in verifier.nodes]
 
     response = {
         'validators': node_addresses,
@@ -2996,7 +9841,7 @@ def check_validators():
 def check_nodes():
     # Convert nodes to dictionaries; handle both Node objects and already dictionary nodes
     node_dicts = []
-    for node in ledger.nodes:
+    for node in verifier.nodes:
         if isinstance(node, Node):
             node_dicts.append(node.to_dict())  # Convert Node object to dictionary using a method
         elif isinstance(node, dict):
@@ -3036,7 +9881,7 @@ def receive_node_data():
         return jsonify({'error': 'Missing required node data', 'missing_keys': missing_keys}), 400
 
     # Adjust this to check both dicts and Node objects properly
-    if any((node.address if isinstance(node, Node) else node['address']) == json_['address'] for node in ledger.nodes):
+    if any((node.address if isinstance(node, Node) else node['address']) == json_['address'] for node in verifier.nodes):
         logging.info(f"Node {json_['address']} is already in the roster of nodes.")
         return jsonify({'message': f'Node {json_["address"]} is already added to roster of nodes'}), 200
 
@@ -3049,7 +9894,7 @@ def receive_node_data():
         'version': json_['version'],
         'steward': json_['steward']
     }
-    ledger.nodes.append(new_node)  # Only add if not already present
+    verifier.nodes.append(new_node)  # Only add if not already present
     ledger.validators.append(new_node['address'])  # Manage this list separately if needed
     logging.info(f"Node {json_['address']} successfully added to the roster of nodes.")
     return jsonify({'message': f'Node {json_["address"]} added to roster of nodes'}), 201
@@ -3169,12 +10014,12 @@ def receive_node_info():
     logging.info(f"Received node information for processing: {received_node_info}")
 
     # Check if the node already exists in the blockchain's nodes list
-    existing_node = next((node for node in ledger.nodes if node.address == received_node_info['address']), None)
+    existing_node = next((node for node in verifier.nodes if node.address == received_node_info['address']), None)
 
     if existing_node is None:
         # If the node does not exist, create a new Node instance and add it to the list
         new_node = received_node_info
-        ledger.nodes.append(new_node)
+        verifier.nodes.append(new_node)
         ledger.validators.append(new_node.address)
         logging.info(f"Added new node with address: {received_node_info['address']}")
     else:
@@ -3257,7 +10102,7 @@ def retrieve_init_date():
 @app.route('/calculate_hash', methods=['POST'])
 def hash_transaction():
     json_ = request.get_json()
-    if not json_:
+    if not data:
         return jsonify({'error': 'No data provided'}), 400
 
     try:
@@ -3287,51 +10132,15 @@ def calculate_fee():
 
 #==== COIN OPERATIONS ====#
 
-# Endpoint for receiving price data from the price feed
-@app.route('/receive_price_data', methods=['POST'])
-@require_authentication
-def receive_price_data():
-    received_price_data = request.json
-    logging.info(f"Received price data for processing: {received_price_data}")
-
-    try:
-        price = received_price_data['price']
-        coin.set_price(price)
-        logging.info(f"Set new price: {price}")
-    except KeyError:
-        logging.error("Invalid data received. 'price' key is missing.")
-        return jsonify({"status": "error", "message": "Invalid data format"}), 400
-
-    return jsonify({"status": "success"}), 200
-
-# Get OMC price
-@app.route('/get_omc_price', methods=['POST'])
-def get_omc_price():
-    data = request.json
-    if 'omc_amount' not in data:
-        return jsonify({'error': 'Missing omc_amount in request'}), 400
-
-    try:
-        omc_amount = float(data['omc_amount'])
-    except ValueError:
-        return jsonify({'error': 'Invalid omc_amount value'}), 400
-
-    # Let's assume you have a method in OMC class to get the current OMC to USD rate
-    current_rate = coin.fetch_current_exchange_rate()  # This should return the current rate of OMC in USD
-
-    usd_amount = omc_amount * current_rate
-    return jsonify({'omc_amount': omc_amount, 'usd_amount': usd_amount})
-
 # Transfer coins
 @app.route('/transfer_coins', methods=['POST'])
-@require_authentication
 def transfer_coins():
     try:
         data = request.get_json()
 
+        # Extract the relevant data from the request
         sender = data.get('from_address')
         recipient = data.get('to_address')
-
         amount = data.get('amount')
         fee = data.get('fee')
         hash = data.get('hash')
@@ -3340,32 +10149,76 @@ def transfer_coins():
         sub_type = data.get('sub_type')
         type = data.get('type')
 
+        # Validate required data
         if sender is None or recipient is None or amount is None:
             return jsonify({"error": "Invalid request data"}), 400
 
-        if ledger.add_transfer_transaction(amount, fee, hash, pub_key, recipient, sender, signature, sub_type, type):
-            response = {
-                'message': 'Transfer tx built successfully. It will be mined in the next block'}
-            return jsonify(response), 200
+        # Check if the transfer request exists and if permission is granted
+        transfer_request = next((req for req in list(coin.request_queue.queue) if req.permission['id'] == hash), None)
+
+        if transfer_request and transfer_request.permission['processed']:
+            # Ensure the request has the appropriate permission
+            if transfer_request.permission['permission'] == 'approved':
+                # Proceed with the transfer
+                if ledger.add_transfer_transaction(amount, fee, hash, pub_key, recipient, sender, signature, sub_type, type):
+                    response = {'message': 'Transfer tx built successfully. It will be mined in the next block'}
+                    return jsonify(response), 200
+                else:
+                    response = {'message': 'Failed to transfer coins'}
+                    return jsonify(response), 400
+            else:
+                return jsonify({"error": "Permission not granted for this transfer"}), 403
         else:
-            response = {'message': 'Failed to transfer coins'}
-            return jsonify(response), 400
+            return jsonify({"error": "Transfer request not found or not processed"}), 404
 
     except ValueError as e:
         return jsonify({'success': False, 'message': str(e)}), 400
     except Exception as e:
         return jsonify({'success': False, 'message': 'Internal Server Error'}), 500
 
-# Locate specific transfer request
+# Create Transfer Request
+@app.route('/create_transfer_request', methods=['POST'])
+def create_transfer_request():
+    data = request.get_json()
+
+    sender = data.get('from_address')
+    recipient = data.get('to_address')
+    amount = data.get('amount')
+    permission = data.get('permission')
+
+    if sender is None or recipient is None or amount is None:
+        return jsonify({"error": "Invalid request data"}), 400
+
+    request = coin.create_transfer_request(sender, recipient, amount, permission)
+    return jsonify({"message": "Transfer request created successfully", "request_id": request.permission['id']}), 200
+
+# Approve Transfer Request
+@app.route('/approve_transfer_request/<request_id>', methods=['POST'])
+def approve_transfer_request(request_id):
+    data = request.get_json()
+    sender_pub = data['sender_pub']
+    permission_sig = data['permission_sig']
+
+    if coin.approve_transfer_request(request_id, sender_pub, permission_sig):
+        return jsonify({"message": "Transfer request approved successfully"}), 200
+    else:
+        return jsonify({"error": "Failed to approve transfer request"}), 400
+
+# Process Transfer Request
+@app.route('/process_transfer_request/<request_id>', methods=['POST'])
+def process_transfer_request(request_id):
+    if coin.process_transfer_request(request_id):
+        return jsonify({"message": "Transfer request processed successfully"}), 200
+    else:
+        return jsonify({"error": "Failed to process transfer request"}), 400
+
+# Get Specific Transfer Request
 @app.route('/get_request/<request_id>', methods=['GET'])
 def get_request(request_id):
     with coin.balance_lock:
-        # Search for the request in the queue based on permission['id']
         requested_request = next((request_obj for request_obj in list(coin.request_queue.queue)
                                  if request_obj.permission['id'] == request_id), None)
-
         if requested_request:
-            # Return the requested request as JSON
             return jsonify({
                 'from_address': requested_request.from_address,
                 'to_address': requested_request.to_address,
@@ -3384,11 +10237,10 @@ def get_request(request_id):
         else:
             return jsonify({'error': 'Request not found'}), 404
 
-# Retrieve all unprocessed requests
+# Get All Unprocessed Requests
 @app.route('/get_requests', methods=['GET'])
 def get_requests():
     with coin.balance_lock:
-        # Filter requests with permission['processed'] set to None
         filtered_requests = [
             {
                 'from_address': request_obj.from_address,
@@ -3408,25 +10260,30 @@ def get_requests():
             for request_obj in list(coin.request_queue.queue)
             if request_obj.permission['processed'] is None
         ]
-
         return jsonify(filtered_requests)
 
-# Endpoint to update request permissions
+# Update Request Permissions
 @app.route('/update_request_permissions/<request_id>', methods=['POST'])
 def update_request_permissions(request_id):
     try:
         data = request.get_json()
-        sender_pub = data['sender_pub']
-        permission_sig = data['permission_sig']
-        permission_approval = data['permission_approval']
+        sender_pub = data.get('sender_pub')
+        permission_sig = data.get('permission_sig')
+        permission_approval = data.get('permission_approval')
+
+        if not sender_pub or not permission_sig or not permission_approval:
+            return jsonify({'error': 'Invalid request data'}), 400
 
         with coin.balance_lock:
-            # Call the Coin class method to update request permissions
             coin.update_request_permissions(request_id, sender_pub, permission_sig, permission_approval)
 
         return jsonify({'success': 'Request permissions updated successfully'})
-    except Exception as e:
+    except ValueError as e:
+        logging.error(f"ValueError: {e}")
         return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logging.error(f"Exception: {e}")
+        return jsonify({'error': 'Internal Server Error'}), 500
 
 # OMC info
 @app.route('/omc_info', methods=['GET'])
@@ -3658,19 +10515,12 @@ def check_activity():
     for amount in coin.burning_history:
         burning_result -= amount
 
-    for activity in coin.other_activity_history:
-        if activity['sender'] == address:
-            other_activity_result -= activity['amount']
-        if activity['recipient'] == address:
-            other_activity_result += activity['amount']
-
     # Prepare the response
     response_data = {
         "address": address,
         "transfer_history": transfer_result,
         "minting_history": minting_result,
-        "burning_history": burning_result,
-        "other_activity_history": other_activity_result,
+        "burning_history": burning_result
     }
 
     return jsonify(response_data), 200
@@ -3679,6 +10529,31 @@ def check_activity():
 @app.route('/get_coin_economy', methods=['GET'])
 def get_max_coin_economy():
     return jsonify(coin.report_coin_economy())
+
+# Whitelist address for pOMC
+@app.route('/whitelist_address_for_pomc', methods=['POST'])
+def whitelist_address_for_pomc():
+    data = request.json
+    address = data.get('address')
+    pub_key = data.get('pub_key')
+    signature = data.get('signature')
+
+    if not address:
+        return jsonify({"message": "Address is required"}), 400
+    
+    if not pub_key:
+        return jsonify({"message": "Public key is required"}), 400
+    
+    if not signature:
+        return jsonify({"message": "Signature is required"}), 400
+
+    try:
+        precursor_coin.whitelist_address(address, pub_key, signature)
+        return jsonify({"message": f"Address {address} whitelisted successfully"}), 200
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+    except Exception as e:
+        return jsonify({"message": "An error occurred", "error": str(e)}), 500
 
 #==== BLOCK PROPAGATION OPS ====#
 
@@ -3730,7 +10605,25 @@ def get_latest_price():
     latest_price = 1.00  # Replace this with the actual logic to get the latest price
     return jsonify({'price': latest_price})
 
-#==== USER OPERATIONS ====#
+@app.route('/initialize_lockup', methods=['POST'])
+def initialize_lockup():
+    try:
+        data = request.get_json()
+        amount = data['amount']
+        address1 = data['address1']
+        address2 = data['address2']
+
+        success = vault.initialize_lockup(amount, address1, address2)
+        if success:
+            return jsonify({'message': 'Lockup initialized successfully.'}), 200
+        else:
+            return jsonify({'message': 'Failed to initialize lockup.'}), 400
+    except KeyError as e:
+        logging.error(f"Missing key in request data: {e}")
+        return jsonify({'error': f"Missing key in request data: {e}"}), 400
+    except Exception as e:
+        logging.error(f"An error occurred: {e}")
+        return jsonify({'error': f"An error occurred: {e}"}), 500
 
 #run it
 if __name__ == '__main__':

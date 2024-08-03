@@ -3,7 +3,7 @@ LABEL maintainer="OmneDAO Foundation <directors@omne.foundation>"
 
 # Install dependencies and clean up apt cache
 RUN apt-get update -y && \
-    apt-get install -y python3-pip python3-dev wget build-essential && \
+    apt-get install -y python3-pip python3-dev wget build-essential docker.io && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy requirements.txt
@@ -34,6 +34,9 @@ RUN chmod +x /entrypoint.sh
 
 # Copy the application code
 COPY ./app /app
+
+# Copy docker-compose.yml into the container
+COPY docker-compose.yml /docker-compose.yml
 
 # Set the working directory
 WORKDIR /app
