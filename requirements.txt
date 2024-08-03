@@ -1,15 +1,13 @@
-numpy
 boto3
 cryptography
 ecdsa
 flask
 flask-cors
-geopy
-googlemaps
 ipfshttpclient
 matplotlib
 mnemonic
 moment
+numpy
 pandas
 pandas_datareader
 passlib
@@ -17,6 +15,7 @@ pycryptodome
 pydantic
 pymongo[snappy,gssapi,srv,tls]
 python-slugify
+qiskit
+qiskit-aer
 requests
 rsa
-stripe

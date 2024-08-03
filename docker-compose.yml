@@ -1,6 +1,6 @@
 version: '3'
 services:
-  node.omne:
+  node1.omne:
     build:
       context: .
       dockerfile: Dockerfile
@@ -22,8 +22,6 @@ services:
     environment:
       - PYTHONPATH=/app
       - STEWARD_ADDRESS=${STEWARD_ADDRESS}
-    stdin_open: true
-    tty: true
 
 networks:
   node_one_omne-net:
