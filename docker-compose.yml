@@ -1,0 +1,59 @@
+# File: open_node/docker-compose.yml
+# Purpose: Docker Compose configuration for deploying the Open-Source Omne Node without secrets.
+
+version: '3.8'
+
+services:
+  node.omne.open:
+    build: 
+      context: .
+      dockerfile: Dockerfile.open_node  # Using Dockerfile.open_node for open-source node
+    image: omne-node:open-source
+    container_name: node.omne.open
+    ports:
+      - "${OPEN_HOST_PORT:-3401}:3400"  # Default to 3401 if OPEN_HOST_PORT not set
+    networks:
+      - omne-net-${NETWORK_SUFFIX}
+      - hash-api-net-${NETWORK_SUFFIX}
+    volumes:
+      - ./app:/app
+    labels:
+      app: omne-node-open
+      level: blockchain
+      role: participant
+      tier: backend
+      track: continuous
+    environment:
+      - PYTHONPATH=/app
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT_NUMBER=${PORT_NUMBER:-3400}
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: '4G'
+        reservations:
+          cpus: '1.0'
+          memory: '2G'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3400/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+networks:
+  omne-net-development:
+    driver: bridge
+  omne-net-staging:
+    driver: bridge
+  omne-net-production:
+    driver: bridge
+  hash-api-net-development:
+    driver: bridge
+  hash-api-net-staging:
+    driver: bridge
+  hash-api-net-production:
+    driver: bridge
+
+volumes:
+  mongo_data:

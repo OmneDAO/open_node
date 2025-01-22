@@ -1,0 +1,7 @@
+# File: support_node/.dockerignore
+
+# Exclude Docker-specific files
+Dockerfile
+Dockerfile.open_node
+Dockerfile.support_node
+docker-compose.yml
