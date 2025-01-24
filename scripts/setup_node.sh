@@ -67,6 +67,7 @@ HOST_PORT=${PORT_NUMBER}
 export NODE_ENV
 export NETWORK_SUFFIX
 export HOST_PORT
+export NODE_ID  # Export NODE_ID
 
 # Update docker-compose.yml with the new node name and port
 DOCKER_COMPOSE_FILE="docker-compose.yml"
@@ -104,7 +105,13 @@ else
     sed -i.bak "/environment:/a \ \ \ \ - NETWORK_SUFFIX=${NETWORK_SUFFIX}" "$DOCKER_COMPOSE_FILE"
 fi
 
-echo "Updated docker-compose.yml with NODE_ENV, NETWORK_SUFFIX, STEWARD_ADDRESS, and PORT_NUMBER."
+if grep -q 'NODE_ID=' "$DOCKER_COMPOSE_FILE"; then
+    sed -i.bak "s|NODE_ID=.*|NODE_ID=${NODE_ID}|g" "$DOCKER_COMPOSE_FILE"
+else
+    sed -i.bak "/environment:/a \ \ \ \ - NODE_ID=${NODE_ID}" "$DOCKER_COMPOSE_FILE"
+fi
+
+echo "Updated docker-compose.yml with NODE_ENV, NETWORK_SUFFIX, STEWARD_ADDRESS, PORT_NUMBER, and NODE_ID."
 
 # Update the Oracle class initialization in app/main.py
 MAIN_PY_FILE="app/main.py"
@@ -124,7 +131,7 @@ else
     # Modify accordingly based on your actual main.py structure
 
     # Example: Setting a variable `current_node_url`
-    sed -i.bak "s|current_node_url = .*|current_node_url = \"http://node${PORT_NUMBER}.omne:3400\"|g" "$MAIN_PY_FILE" || true
+    sed -i.bak "s|current_node_url = .*|current_node_url = \"http://${NODE_ID}.omne:${PORT_NUMBER}\"|g" "$MAIN_PY_FILE" || true
 
     echo "Updated app/main.py with steward address and node URL."
 fi

@@ -9,7 +9,6 @@ import signal
 import sys
 
 from block import Block
-from class_integrity_verifier import ClassIntegrityVerifier
 from ledger import Ledger
 from mempool import Mempool
 from account_manager import AccountManager
@@ -21,9 +20,6 @@ from dynamic_fee_calculator import DynamicFeeCalculator
 from crypto_utils import CryptoUtils
 from node import Node
 from verifier import Verifier
-
-from pymongo.mongo_client import MongoClient
-from pymongo.server_api import ServerApi
 
 import requests
 from vrf_utils import VRFUtils  # Import VRFUtils
@@ -195,30 +191,13 @@ def main():
     # Ensure that VALIDATOR_PRIVATE_KEY and VALIDATOR_VRF_PRIVATE_KEY exist in .env
     VALIDATOR_PRIVATE_KEY, VALIDATOR_VRF_PRIVATE_KEY = ensure_keys_in_env(env_path)
 
-    # Read other secrets from /run/secrets
-    # In an open-source validator, we no longer use treasury secrets
-    # Hence, remove reading TREASURY_ADDRESS, TREASURY_PUBLIC_KEY, TREASURY_PRIVATE_KEY
-
-    # Instead, ensure that STEWARD_ADDRESS is set via environment variable or generated
+    # Read STEWARD_ADDRESS from environment variables
     STEWARD_ADDRESS = os.getenv("STEWARD_ADDRESS")
     if not STEWARD_ADDRESS:
         logger.error("STEWARD_ADDRESS environment variable not set.")
         sys.exit(1)
     else:
         logger.info(f"Steward Address: {STEWARD_ADDRESS}")
-
-    # Read MongoDB URI from secrets
-    MONGODB_URI = read_secret("MONGODB_URI")
-
-    # Initialize MongoDB client
-    try:
-        mongo_client = MongoClient(MONGODB_URI, server_api=ServerApi('1'))  # Ensure server_api is set if needed
-        # Optionally, test the connection
-        mongo_client.admin.command('ping')
-        logger.info("Successfully connected to MongoDB.")
-    except Exception as e:
-        logger.critical(f"Failed to connect to MongoDB: {e}")
-        sys.exit(1)  # Exit since MongoDB is critical
 
     # Initialize CryptoUtils
     crypto_utils = CryptoUtils()
@@ -252,6 +231,8 @@ def main():
         }
     )
 
+    # Initialize StakedOMC and StakingMngr have been removed as staking is not automatic in open-source mode
+
     # Initialize Mempool with corrected keyword arguments
     mempool = Mempool(
         crypto_utils=crypto_utils,
@@ -264,14 +245,13 @@ def main():
         stale_time=3600
     )
 
-    # Initialize Ledger with references to AccountManager, OMC, Fee Calculator, Mempool, and MongoDB
+    # Initialize Ledger with references to AccountManager, OMC, Fee Calculator, Mempool
     ledger = Ledger(
         account_manager=account_manager,
         omc=omc,
         fee_calculator=fee_calculator,
         consensus_engine=None,  # To be set after ConsensusEngine is initialized
         mempool=mempool,
-        mongo_client=mongo_client,
         auto_mine_interval=1
     )
 
@@ -279,7 +259,7 @@ def main():
     node = Node(
         address=None,  # Will be generated if not provided
         stake_weight=1,  # Assuming initial stake weight
-        url=os.getenv("NODE_URL", "http://localhost:3400"),
+        url=None,  # Will be set dynamically from environment variables
         version="0.0.1",
         private_key=VALIDATOR_PRIVATE_KEY,  # Provided via .env
         public_key=crypto_utils.get_public_key_pem(VALIDATOR_PRIVATE_KEY),   # Derived from private key
@@ -292,37 +272,8 @@ def main():
     verifier = Verifier(ledger=ledger)
     ledger.verifier = verifier  # Assign verifier to ledger
 
-    # Register the validator with an initial stake via AccountManager
-    # In an open-source setup, staking is done by the node itself or externally
-    # Here, we'll assume the node stakes its own funds
-    validator_address = node.address  # The node's own address
-
-    # Ensure that the node has sufficient balance to stake
-    # For simplicity, we'll assume the account starts with zero and needs to be funded externally
-
-    # Check if the account has enough balance
-    balance = account_manager.get_balance(validator_address)
-    required_stake = Decimal('1000')  # Example stake amount
-
-    if balance < required_stake:
-        logger.error(f"Insufficient balance to stake. Required: {required_stake} OMC, Available: {balance} OMC.")
-        sys.exit(1)
-
-    # Stake coins using AccountManager
-    staking_success = account_manager.stake_coins(
-        address=validator_address,
-        amount=required_stake,
-        min_term=100,
-        pub_key=node.public_key  # Assuming node has a public_key attribute
-    )
-
-    if staking_success:
-        # Register the validator
-        omc.register_validator(validator_address)
-        logger.info(f"Validator {validator_address} registered successfully.")
-    else:
-        logger.critical("Staking failed. Cannot register validator.")
-        sys.exit(1)
+    # **Removed Automatic Staking Functionality**
+    # All staking-related code has been removed to make staking optional for open-source nodes.
 
     # Initialize VRFUtils with the validator's VRF private key
     vrf_utils = VRFUtils(private_key_pem=VALIDATOR_VRF_PRIVATE_KEY)
@@ -334,6 +285,7 @@ def main():
         account_manager=account_manager,
         vrf_utils=vrf_utils,
         blockchain=ledger,  # Pass ledger as the blockchain reference
+        staking_manager=None,  # No staking manager in open-source mode
         randao_commit_duration=60,    # seconds
         randao_reveal_duration=60,    # seconds
         poef_task_difficulty=4,        # leading zeros
@@ -355,7 +307,6 @@ def main():
     network_manager = NetworkManager(
         ledger=ledger,
         mempool=mempool,
-        class_integrity_verifier=ClassIntegrityVerifier(),
         fee_calculator=fee_calculator,
         port=int(os.getenv("PORT_NUMBER", "3400")),
         omc=omc
@@ -373,12 +324,8 @@ def main():
     )
     ledger.smart_contracts = smart_contracts  # Assign smart contracts to ledger
 
-    # Remove Initializer usage
-    # The Initializer class is no longer needed in the open-source version
-    # Ensure that any tasks previously handled by Initializer are now managed elsewhere
-
     # Determine node role
-    node_role = os.getenv("NODE_ROLE", "validator")  # Default to 'validator' instead of 'validator_initial'
+    node_role = os.getenv("NODE_ROLE", "validator")  # Default to 'validator'
 
     if node_role == "validator_initial":
         # Initial validator node can skip class integrity verification
@@ -394,7 +341,7 @@ def main():
             known_hashes = response.json()
 
             # Perform verification
-            if not ClassIntegrityVerifier.verify_class_integrity(known_hashes):
+            if not Verifier.verify_class_integrity(known_hashes):
                 logger.critical("Class integrity verification failed. Exiting.")
                 sys.exit(1)
             else:
@@ -418,6 +365,9 @@ def main():
     consensus_thread = threading.Thread(target=consensus_engine.start_consensus_routine, daemon=True)
     consensus_thread.start()
     logger.info("ConsensusEngine consensus routine started.")
+
+    # Initialize and start SmartContracts (if needed)
+    # smart_contracts.initialize()  # Uncomment if SmartContracts require initialization
 
     # Define signal handlers for graceful shutdown
     def signal_handler(sig, frame):

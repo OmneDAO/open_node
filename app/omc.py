@@ -64,6 +64,7 @@ class OMC:
         self.coin_max = coin_max
         self.initial_reward = initial_reward
         self.halving_interval = timedelta(days=halving_interval_days)
+        self.staking_manager = None
 
         self.lock = threading.RLock()  # Reentrant lock to allow nested acquisitions
 
@@ -160,14 +161,47 @@ class OMC:
             self.logger.info(f"Validator {validator_address} deregistered successfully.")
             return True
 
+    def set_staking_manager(self, staking_manager: StakingMngr):
+        """
+        Sets the StakingMngr instance to interface with active staking agreements.
+
+        :param staking_manager: Instance of StakingMngr.
+        """
+        self.staking_manager = staking_manager
+        logging.info("StakingManager has been set in OMC.")
+
     def get_active_validators(self) -> List[str]:
         """
-        Retrieves a list of active validator IDs.
+        Retrieves a list of active validator addresses based on active staking agreements.
 
-        :return: List of active validator IDs.
+        :return: List of validator addresses.
         """
-        with self.lock:
-            return list(self.active_validators)
+        if not self.staking_manager:
+            logging.error("StakingManager not set in OMC. Cannot retrieve active validators.")
+            return []
+
+        active_validators = [
+            agreement['address'] for agreement in self.staking_manager.staking_agreements
+            if self._is_staking_active(agreement)
+        ]
+        logging.debug(f"Active validators retrieved: {active_validators}")
+        return active_validators
+
+    def _is_staking_active(self, agreement: dict) -> bool:
+        """
+        Determines if a staking agreement is active based on its start date and minimum term.
+
+        :param agreement: A staking agreement dictionary.
+        :return: True if active, False otherwise.
+        """
+        start_date = datetime.fromisoformat(agreement['start_date'])
+        min_term = agreement['min_term']  # in days or blocks, depending on implementation
+
+        # Example: Check if the current time is past the staking period
+        current_time = datetime.now(timezone.utc)
+        staking_duration = timedelta(days=min_term)  # Adjust based on actual min_term unit
+
+        return current_time >= (start_date + staking_duration)
 
     # ----------------------------
     # Governance Mechanism
