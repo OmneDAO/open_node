@@ -116,6 +116,19 @@ if not treasury_address:
     sys.exit(1)
 coin = OMC(treasury_address=treasury_address)
 
+# Initialize StakedOMC
+staked_omc = StakedOMC()
+
+# Initialize StakingMngr
+staking_manager = StakingMngr(
+    coin=coin, 
+    account_manager=account_manager, 
+    staked_omc=staked_omc
+)
+
+# Set StakingMngr in OMC
+coin.set_staking_manager(staking_manager)
+
 # Initialize ConsensusEngine
 consensus_engine = ConsensusEngine(
     account_manager=account_manager,
@@ -127,7 +140,13 @@ consensus_engine = ConsensusEngine(
 mempool = Mempool(
     crypto_utils=crypto_utils,
     fee_calculator=fee_calculator,
-    max_mempool_size=10000
+    max_mempool_size=10000,
+    ledger=ledger,
+    omc=coin,
+    account_manager=account_manager,
+    vrf_utils=vrf_utils,
+    blockchain=ledger.blockchain,  # Assuming ledger has a blockchain attribute
+    staking_manager=staking_manager,  # Pass the staking_manager instance
 )
 
 # Initialize Ledger

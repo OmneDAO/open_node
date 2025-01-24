@@ -17,6 +17,7 @@ from omc import OMC  # Assumed OMC class managing validators and rewards
 from ledger import Ledger  # Assumed Ledger class managing blockchain
 from account_manager import AccountManager  # Assumed AccountManager class
 from alpha_generator import AlphaGenerator  # Import AlphaGenerator
+from staking import StakingMngr
 
 # ----------------------------------------------------------------
 #  ConsensusEngine Class Definition
@@ -35,6 +36,7 @@ class ConsensusEngine:
                  account_manager: AccountManager,
                  vrf_utils: VRFUtils,  # Instance of VRFUtils
                  blockchain,  # Reference to the blockchain instance
+                 staking_manager: StakingMngr,
                  randao_commit_duration: int = 60,  # seconds
                  randao_reveal_duration: int = 60,  # seconds
                  poef_task_difficulty: int = 4,  # Number of leading zeros required in PoE proof
@@ -59,6 +61,7 @@ class ConsensusEngine:
         self.account_manager = account_manager
         self.vrf_utils = vrf_utils
         self.blockchain = blockchain  # Assign blockchain reference
+        self.staking_manager = staking_manager
 
         self.network_manager = None  # To be set via set_network_manager
 
@@ -308,6 +311,104 @@ class ConsensusEngine:
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Error retrieving public key from {validator_id}: {e}")
             return None
+        
+    def select_miner(self) -> Optional[dict]:
+        """
+        Selects an eligible miner from active staking agreements managed by StakingMngr.
+        
+        :return: A dictionary representing the selected miner's details or None if selection fails.
+        """
+        logging.info("Selecting an eligible miner from active staking agreements.")
+
+        # Retrieve active staking agreements
+        staking_agreements = self.staking_manager.get_active_staking_agreements()
+
+        # Filter active staking agreements (e.g., based on minimum staking period)
+        active_staking = [
+            agreement for agreement in staking_agreements
+            if self._is_staking_active(agreement)
+        ]
+
+        if not active_staking:
+            logging.warning("No active staking agreements found for miner selection.")
+            return None
+
+        # Calculate the number of withdrawals for each account
+        for agreement in active_staking:
+            address = agreement['address']
+            # Calculate withdrawals from the ledger's transaction history
+            agreement['withdrawals'] = self._calculate_withdrawals(address)
+
+        # Select miner based on weighted selection (amount staked and withdrawals)
+        selected_miner = self.weighted_selection(active_staking)
+
+        if selected_miner:
+            logging.info(f"Selected miner: {selected_miner['address']}")
+        else:
+            logging.warning("Miner selection failed. No miner was selected.")
+
+        return selected_miner
+    
+    def _is_staking_active(self, agreement: dict) -> bool:
+        """
+        Determines if a staking agreement is active based on its start date and minimum term.
+
+        :param agreement: A staking agreement dictionary.
+        :return: True if active, False otherwise.
+        """
+        start_date = datetime.fromisoformat(agreement['start_date'])
+        min_term = agreement['min_term']  # in days or blocks, depending on implementation
+
+        # Example: Check if the current time is past the staking period
+        current_time = datetime.now(timezone.utc)
+        staking_duration = timedelta(days=min_term)  # Adjust based on actual min_term unit
+
+        return current_time >= (start_date + staking_duration)
+
+    def _calculate_withdrawals(self, address: str) -> int:
+        """
+        Calculates the number of withdrawals an address has made.
+
+        :param address: The address to calculate withdrawals for.
+        :return: The number of withdrawals.
+        """
+        withdrawals = 0
+        for block in self.chain:
+            for tx in block['transactions']:
+                if tx.get('address') == address and tx.get('type') == 'withdrawal':
+                    withdrawals += 1
+        logging.debug(f"Address {address} has {withdrawals} withdrawals.")
+        return withdrawals
+
+    def weighted_selection(self, agreements: List[dict]) -> Optional[dict]:
+        """
+        Selects a miner using a weighted random selection based on staked amount and withdrawals.
+
+        :param agreements: List of active staking agreements.
+        :return: Selected miner's agreement dictionary or None.
+        """
+        # Calculate weights: higher stake and fewer withdrawals increase weight
+        total_weight = 0
+        weights = []
+        for agreement in agreements:
+            stake = Decimal(agreement['amount'])
+            withdrawals = agreement.get('withdrawals', 0)
+            weight = float(stake) / (withdrawals + 1)  # +1 to prevent division by zero
+            weights.append(weight)
+            total_weight += weight
+
+        if total_weight == 0:
+            logging.error("Total weight is zero. Cannot perform weighted selection.")
+            return None
+
+        # Normalize weights
+        normalized_weights = [w / total_weight for w in weights]
+
+        # Perform weighted random selection
+        chosen_agreement = random.choices(agreements, weights=normalized_weights, k=1)[0]
+
+        logging.info(f"Miner selected based on staking agreements: {chosen_agreement['address']}")
+        return chosen_agreement
 
     # ----------------------------------------------------------------
     #  LEADER SELECTION
