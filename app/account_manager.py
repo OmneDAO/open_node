@@ -70,7 +70,7 @@ class AccountManager:
         self.on_staking_contract_removed = Event()
         self.on_public_key_updated = Event()
 
-        logging.info("[AccountManager] Initialized with empty balances, staking contracts, and public keys.")
+        self.logger = logging.info("[AccountManager] Initialized with empty balances, staking contracts, and public keys.")
 
     # ----------------------------
     # Event Subscription Methods
@@ -110,16 +110,19 @@ class AccountManager:
     # ----------------------------
     # Balance Management
     # ----------------------------
-    def get_account_balance(self, address: str) -> Decimal:
+    def get_account_balance(self, address: str) -> Optional[Decimal]:
         """
         Retrieves the balance of a given account.
 
         :param address: The address of the account.
-        :return: Balance as Decimal.
+        :return: Balance as Decimal or None if account does not exist.
         """
         with self.balances_lock:
-            balance = self.balances.get(address, Decimal('0'))
-            logging.debug(f"[AccountManager] Retrieved balance for {address}: {balance} OMC.")
+            balance = self.balances.get(address)
+            if balance is not None:
+                logger.debug(f"[AccountManager] Retrieved balance for {address}: {balance} OMC.")
+            else:
+                logger.debug(f"[AccountManager] Balance for {address} not found.")
             return balance
 
     def credit_account(self, address: str, amount: Decimal) -> bool:

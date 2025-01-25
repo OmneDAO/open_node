@@ -160,14 +160,20 @@ class StakedOMC:
 
         return True
 
-    def get_balance(self, address: str) -> Decimal:
+    def get_balance(self, address: str) -> Optional[Decimal]:
         """
-        Get the balance of staked coins for a specific staker.
+        Retrieves the sOMC balance of a given account.
 
-        :param address: Address to query.
-        :return: Balance of sOMC.
+        :param address: The address of the account.
+        :return: sOMC balance as Decimal or None if account does not exist.
         """
-        return self.balance.get(address, Decimal('0'))
+        with self.lock:
+            balance = self.balance.get(address)
+            if balance is not None:
+                logger.debug(f"[StakedOMC] Retrieved sOMC balance for {address}: {balance} sOMC.")
+            else:
+                logger.debug(f"[StakedOMC] sOMC balance for {address} not found.")
+            return balance
 
     def transfer(self, from_address: str, to_address: str, amount: Decimal) -> None:
         """

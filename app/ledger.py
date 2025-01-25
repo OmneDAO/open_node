@@ -22,6 +22,7 @@ from omc import OMC
 from block import Block  # Import the Block class
 from node import Node
 from verifier import Verifier
+from staking import StakedOMC, StakingMngr
 
 class Ledger:
     """
@@ -107,6 +108,14 @@ class Ledger:
         # Initialize Node and Verifier
         self.node: Optional[Node] = None  # Will be set externally
         self.verifier: Optional[Verifier] = None  # Will be set externally
+        
+        # Initialize StakedOMC
+        self.staked_omc = StakedOMC()
+        self.staking_manager = StakingMngr(
+            coin=self.omc,
+            account_manager=self.account_manager,
+            staked_omc=self.staked_omc
+        )
 
         # Initialize genesis block
         self._initialize_genesis_block()

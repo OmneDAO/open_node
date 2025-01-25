@@ -1,4 +1,4 @@
-# ~/app/permissions.py
+# permissions.py
 
 import logging
 

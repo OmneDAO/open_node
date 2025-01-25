@@ -271,10 +271,9 @@ def main():
     # Initialize Verifier
     verifier = Verifier(ledger=ledger)
     ledger.verifier = verifier  # Assign verifier to ledger
-
-    # **Removed Automatic Staking Functionality**
-    # All staking-related code has been removed to make staking optional for open-source nodes.
-
+    
+    staking_manager = ledger.staking_manager
+    
     # Initialize VRFUtils with the validator's VRF private key
     vrf_utils = VRFUtils(private_key_pem=VALIDATOR_VRF_PRIVATE_KEY)
 

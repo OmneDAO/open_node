@@ -4,15 +4,29 @@ import logging
 from decimal import Decimal, getcontext, ROUND_DOWN, InvalidOperation
 from datetime import datetime, timedelta, timezone
 import threading
-from typing import Dict, Any, Optional, List, Set
-import secrets  # For generating secure contract IDs
+from typing import Dict, Any, Optional, List, Set, Tuple
+import secrets
+import re
+import queue  # Import queue for handling transfer requests
 
-# Assuming AccountManager is defined in account_manager.py
+# Import AccountManager from account_manager.py
 from account_manager import AccountManager
 
 # Set decimal precision higher to handle financial calculations accurately
 getcontext().prec = 28
 getcontext().rounding = ROUND_DOWN
+
+
+class TransferRequest:
+    def __init__(self, from_address: str, to_address: str, amount: Decimal, permission: Dict[str, Any], sender_pub: Optional[str] = None, permission_sig: Optional[str] = None):
+        self.from_address = from_address
+        self.to_address = to_address
+        self.amount = amount
+        self.permission = permission  # Should include 'id' and 'processed' status
+        self.sender_pub = sender_pub
+        self.permission_sig = permission_sig
+        self.timestamp = datetime.now(timezone.utc)
+        self.status = "pending"  # Possible statuses: pending, approved, declined, processed
 
 
 class OMC:
@@ -64,7 +78,7 @@ class OMC:
         self.coin_max = coin_max
         self.initial_reward = initial_reward
         self.halving_interval = timedelta(days=halving_interval_days)
-        self.staking_manager = None
+        self.staking_manager = None  # To be set via setter method
 
         self.lock = threading.RLock()  # Reentrant lock to allow nested acquisitions
 
@@ -88,6 +102,14 @@ class OMC:
         # Active Validators and their URLs
         self.active_validators: Set[str] = set()  # Set of active validator IDs (e.g., addresses)
         self.validator_url_mapping: Dict[str, str] = {}  # Maps validator_id to validator_url
+
+        # Initialize transfer histories
+        self.transfer_history: List[Tuple[str, str, Decimal]] = []  # (from, to, amount)
+        self.minting_history: List[Tuple[str, Decimal]] = []       # (to, amount)
+        self.burning_history: List[Decimal] = []
+
+        # Initialize transfer request queue
+        self.request_queue = queue.Queue()
 
         # Initialize logger before processing minting rules
         self.logger.info(
@@ -160,15 +182,15 @@ class OMC:
             self.active_validators.remove(validator_address)
             self.logger.info(f"Validator {validator_address} deregistered successfully.")
             return True
-        
-    def set_staking_manager(self, staking_manager: StakingMngr):
+
+    def set_staking_manager(self, staking_manager: 'StakingMngr'):
         """
         Sets the StakingMngr instance to interface with active staking agreements.
 
         :param staking_manager: Instance of StakingMngr.
         """
         self.staking_manager = staking_manager
-        logging.info("StakingManager has been set in OMC.")
+        self.logger.info("StakingManager has been set in OMC.")
 
     def get_active_validators(self) -> List[str]:
         """
@@ -177,17 +199,17 @@ class OMC:
         :return: List of validator addresses.
         """
         if not self.staking_manager:
-            logging.error("StakingManager not set in OMC. Cannot retrieve active validators.")
+            self.logger.error("StakingManager not set in OMC. Cannot retrieve active validators.")
             return []
 
         active_validators = [
             agreement['address'] for agreement in self.staking_manager.staking_agreements
             if self._is_staking_active(agreement)
         ]
-        logging.debug(f"Active validators retrieved: {active_validators}")
+        self.logger.debug(f"Active validators retrieved: {active_validators}")
         return active_validators
 
-    def _is_staking_active(self, agreement: dict) -> bool:
+    def _is_staking_active(self, agreement: Dict[str, Any]) -> bool:
         """
         Determines if a staking agreement is active based on its start date and minimum term.
 
@@ -303,7 +325,7 @@ class OMC:
         total_fee: Decimal, 
         current_block_height: int, 
         validator_address: str, 
-        miner_address: str
+        miner_address: Optional[str] = None
     ) -> Dict[str, Decimal]:
         """
         Mints new OMC as block rewards, based on the current block height and halving schedule.
@@ -325,16 +347,12 @@ class OMC:
 
             # Define reward distribution ratios
             # Example: Validator - 50%, Miner - 30%, Treasury - 20%
-            distribution = {
-                'validator': Decimal('0.5'),
-                'miner': Decimal('0.3'),
-                'treasury': Decimal('0.2')
-            }
+            distribution = self.reward_distribution
 
             # Calculate individual rewards
-            validator_reward = (total_reward * distribution['validator']).quantize(Decimal('0.000000000000000001'))
-            miner_reward = (total_reward * distribution['miner']).quantize(Decimal('0.000000000000000001')) if miner_address else Decimal('0')
-            treasury_reward = (total_reward * distribution['treasury']).quantize(Decimal('0.000000000000000001'))
+            validator_reward = (total_reward * distribution.get('validator', Decimal('0.0'))).quantize(Decimal('0.000000000000000001'))
+            miner_reward = (total_reward * distribution.get('miner', Decimal('0.0'))).quantize(Decimal('0.000000000000000001')) if miner_address else Decimal('0')
+            treasury_reward = (total_reward * distribution.get('treasury', Decimal('0.0'))).quantize(Decimal('0.000000000000000001'))
 
             # Ensure not exceeding max supply
             if self.total_minted + total_reward > self.coin_max:
@@ -348,9 +366,9 @@ class OMC:
                     }
 
                 # Adjust rewards proportionally
-                validator_reward = (allowed_reward * distribution['validator']).quantize(Decimal('0.000000000000000001'))
-                miner_reward = (allowed_reward * distribution['miner']).quantize(Decimal('0.000000000000000001')) if miner_address else Decimal('0')
-                treasury_reward = (allowed_reward * distribution['treasury']).quantize(Decimal('0.000000000000000001'))
+                validator_reward = (allowed_reward * distribution.get('validator', Decimal('0.0'))).quantize(Decimal('0.000000000000000001'))
+                miner_reward = (allowed_reward * distribution.get('miner', Decimal('0.0'))).quantize(Decimal('0.000000000000000001')) if miner_address else Decimal('0')
+                treasury_reward = (allowed_reward * distribution.get('treasury', Decimal('0.0'))).quantize(Decimal('0.000000000000000001'))
                 total_reward = validator_reward + miner_reward + treasury_reward
                 self.logger.warning(
                     f"Minting adjusted to not exceed max supply. Minted {total_reward} OMC instead of {block_reward + total_fee} OMC."
@@ -372,7 +390,7 @@ class OMC:
                 'miner': miner_reward, 
                 'treasury': treasury_reward
             }
-            
+
     def _check_and_halve_reward(self):
         """
         Checks if the halving interval has passed and halves the current block reward if necessary.
@@ -396,7 +414,7 @@ class OMC:
         self, 
         validator_address: str, 
         validator_reward: Decimal, 
-        miner_address: str, 
+        miner_address: Optional[str], 
         miner_reward: Decimal, 
         treasury_reward: Decimal
     ) -> None:
@@ -433,118 +451,249 @@ class OMC:
             self.logger.error(f"Failed to distribute {treasury_reward} OMC to treasury {self.treasury_address}.")
 
     # ----------------------------
-    # Reward and Slashing Methods
+    # Transfer Methods
     # ----------------------------
-    def reward_validator(self, validator_id: str, block_index: int) -> None:
+    def create_transfer_request(self, from_address: str, to_address: str, amount: Decimal, permission: Dict[str, Any]) -> TransferRequest:
         """
-        Rewards a validator for proposing a block.
+        Creates a new transfer request.
 
-        :param validator_id: The identifier/address of the validator.
-        :param block_index: The index of the block being rewarded.
+        :param from_address: Sender's address.
+        :param to_address: Recipient's address.
+        :param amount: Amount to transfer.
+        :param permission: Permission dictionary, initially {'permission': 'pending'}.
+        :return: TransferRequest instance.
         """
-        # Assuming that the ConsensusEngine has already determined the leader and passed the necessary information
-        # For simplicity, we'll simulate total_fee as 0 here. Adjust as needed.
-        total_fee = Decimal('0')  # This should be fetched from the block or consensus context
-        self.mint_for_block_fee(total_fee, block_index, validator_id)
+        # Check for double-spending
+        if self.check_double_spending(from_address, to_address, amount):
+            raise DoubleSpendingError("Double spending detected.")
 
-    def slash_validator(self, validator_id: str) -> None:
+        # Generate a unique transfer request ID
+        request_id = self.generate_request_id()
+        permission['id'] = request_id
+        permission['processed'] = None  # None indicates pending
+
+        # Create the TransferRequest object
+        transfer_request = TransferRequest(from_address, to_address, amount, permission)
+
+        # Add the transfer request to the queue
+        with self.lock:
+            self.request_queue.put(transfer_request)
+            self.logger.info(f"Transfer request {request_id} created from {from_address} to {to_address} for amount {amount} OMC.")
+
+        return transfer_request
+
+    def approve_transfer_request(self, request_id: str, sender_pub: str, permission_sig: str) -> bool:
         """
-        Slashes a validator for misconduct.
+        Approves a transfer request.
 
-        :param validator_id: The identifier/address of the validator.
-        """
-        # Implement slashing logic here
-        # This could involve removing the validator, reducing their stake, etc.
-        if self.remove_validator(validator_id):
-            self.logger.warning(f"Validator {validator_id} has been slashed and deregistered from active validators.")
-        else:
-            self.logger.error(f"Failed to slash validator {validator_id}. Validator may not be active.")
-
-    # ----------------------------
-    # Governance Methods
-    # ----------------------------
-    def approve_reward_distribution_change(self, proposal_index: int) -> bool:
-        """
-        Approves a reward distribution change proposal manually.
-
-        :param proposal_index: Index of the proposal in the pending_ratio_changes list.
+        :param request_id: ID of the transfer request.
+        :param sender_pub: Sender's public key.
+        :param permission_sig: Signature for permission.
         :return: True if approval is successful, False otherwise.
         """
         with self.lock:
-            if proposal_index >= len(self.pending_ratio_changes) or proposal_index < 0:
-                self.logger.error("Invalid proposal index.")
+            # Iterate through the queue to find the request
+            found = False
+            temp_queue = queue.Queue()
+            while not self.request_queue.empty():
+                request = self.request_queue.get()
+                if request.permission['id'] == request_id:
+                    request.sender_pub = sender_pub
+                    request.permission_sig = permission_sig
+                    request.permission['processed'] = datetime.now(timezone.utc).isoformat()
+                    request.status = "approved"
+                    self.logger.info(f"Transfer request {request_id} approved.")
+                    found = True
+                temp_queue.put(request)
+
+            # Restore the queue
+            self.request_queue = temp_queue
+
+            return found
+
+    def decline_transfer_request(self, request_id: str) -> bool:
+        """
+        Declines a transfer request.
+
+        :param request_id: ID of the transfer request.
+        :return: True if decline is successful, False otherwise.
+        """
+        with self.lock:
+            # Iterate through the queue to find and remove the request
+            found = False
+            temp_queue = queue.Queue()
+            while not self.request_queue.empty():
+                request = self.request_queue.get()
+                if request.permission['id'] == request_id:
+                    request.status = "declined"
+                    self.logger.info(f"Transfer request {request_id} declined.")
+                    found = True
+                    continue  # Skip adding to temp_queue to remove it
+                temp_queue.put(request)
+
+            # Restore the queue
+            self.request_queue = temp_queue
+
+            return found
+
+    def process_transfer_request(self, request_id: str) -> bool:
+        """
+        Processes an approved transfer request.
+
+        :param request_id: ID of the transfer request.
+        :return: True if processing is successful, False otherwise.
+        """
+        with self.lock:
+            # Iterate through the queue to find the approved request
+            found = False
+            temp_queue = queue.Queue()
+            while not self.request_queue.empty():
+                request = self.request_queue.get()
+                if request.permission['id'] == request_id and request.permission['processed']:
+                    try:
+                        success = self.transfer(request.from_address, request.to_address, request.amount)
+                        if success:
+                            self.logger.info(f"Transfer request {request_id} processed successfully.")
+                            found = True
+                    except Exception as e:
+                        self.logger.error(f"Failed to process transfer request {request_id}: {e}")
+                        # Optionally, re-add the request to the queue or mark as failed
+                else:
+                    temp_queue.put(request)
+
+            # Restore the queue
+            self.request_queue = temp_queue
+
+            return found
+
+    def get_request_by_id(self, request_id: str) -> Optional[TransferRequest]:
+        """
+        Retrieves a transfer request by its ID.
+
+        :param request_id: ID of the transfer request.
+        :return: TransferRequest instance or None if not found.
+        """
+        with self.lock:
+            temp_queue = queue.Queue()
+            found_request = None
+            while not self.request_queue.empty():
+                request = self.request_queue.get()
+                if request.permission['id'] == request_id:
+                    found_request = request
+                temp_queue.put(request)
+            self.request_queue = temp_queue
+            return found_request
+
+    def get_pending_requests_for_user(self, address: str) -> List[Dict[str, Any]]:
+        """
+        Retrieves all pending transfer requests for a specific user.
+
+        :param address: User's address.
+        :return: List of pending transfer request dictionaries.
+        """
+        with self.lock:
+            temp_queue = queue.Queue()
+            pending_requests = []
+            while not self.request_queue.empty():
+                request = self.request_queue.get()
+                if request.to_address == address and request.status == "pending":
+                    pending_requests.append({
+                        'from_address': request.from_address,
+                        'to_address': request.to_address,
+                        'amount': str(request.amount),
+                        'request_id': request.permission['id'],
+                        'timestamp': request.timestamp.isoformat()
+                    })
+                temp_queue.put(request)
+            self.request_queue = temp_queue
+            return pending_requests
+
+    def update_request_permissions(self, request_id: str, sender_pub: str, permission_sig: str, permission_approval: str) -> bool:
+        """
+        Updates permissions for a specific transfer request.
+
+        :param request_id: ID of the transfer request.
+        :param sender_pub: Sender's public key.
+        :param permission_sig: Permission signature.
+        :param permission_approval: Approval status ('approved' or 'declined').
+        :return: True if update is successful, False otherwise.
+        """
+        with self.lock:
+            found = False
+            temp_queue = queue.Queue()
+            while not self.request_queue.empty():
+                request = self.request_queue.get()
+                if request.permission['id'] == request_id:
+                    request.sender_pub = sender_pub
+                    request.permission_sig = permission_sig
+                    request.permission['processed'] = permission_approval
+                    request.status = "approved" if permission_approval.lower() == 'approved' else "declined"
+                    self.logger.info(f"Transfer request {request_id} permissions updated to {permission_approval}.")
+                    found = True
+                temp_queue.put(request)
+            self.request_queue = temp_queue
+            return found
+
+    # ----------------------------
+    # Transfer Execution Method
+    # ----------------------------
+    def transfer(self, from_address: str, to_address: str, amount: Decimal) -> bool:
+        """
+        Executes a transfer from one address to another.
+
+        :param from_address: Sender's address.
+        :param to_address: Recipient's address.
+        :param amount: Amount to transfer.
+        :return: True if transfer is successful, False otherwise.
+        """
+        with self.account_manager.balances_lock:
+            if from_address not in self.account_manager.balances:
+                self.logger.error("Sender address does not exist.")
                 return False
 
-            proposal = self.pending_ratio_changes[proposal_index]
-
-            if proposal['approved']:
-                self.logger.warning(f"Proposal {proposal_index} has already been approved.")
+            if self.account_manager.balances[from_address] < amount:
+                self.logger.error("Insufficient balance for transfer.")
                 return False
 
-            # Directly approve the proposal
-            self._apply_reward_distribution_change(proposal['new_distribution'])
-            proposal['approved'] = True
-            self.logger.info(
-                f"Proposal {proposal_index} manually approved. Reward distribution updated to {proposal['new_distribution']}."
-            )
+            # Debit sender
+            self.account_manager.debit_account(from_address, amount)
+
+            # Credit recipient
+            self.account_manager.credit_account(to_address, amount)
+
+            # Log the transfer
+            self.transfer_history.append((from_address, to_address, amount))
+            self.logger.info(f"Transferred {amount} OMC from {from_address} to {to_address}.")
+
             return True
-
-    # ----------------------------
-    # Accessor Methods
-    # ----------------------------
-    def get_current_reward(self) -> Decimal:
-        """
-        Returns the current block reward.
-        """
-        with self.lock:
-            return self.current_reward
-
-    def get_total_minted(self) -> Decimal:
-        """
-        Returns the total amount of OMC minted so far.
-        """
-        with self.lock:
-            return self.total_minted
-
-    def get_treasury_address(self) -> str:
-        """
-        Returns the treasury address.
-        """
-        return self.treasury_address
-
-    def get_reward_distribution(self) -> Dict[str, Decimal]:
-        """
-        Returns the current reward distribution ratios.
-        """
-        with self.lock:
-            return self.reward_distribution.copy()
 
     # ----------------------------
     # Utility Methods
     # ----------------------------
-    def calculate_average_block_time(self, last_n_blocks: int = 100) -> Decimal:
+    def generate_request_id(self) -> str:
         """
-        Calculates the average block time over the last N blocks.
+        Generates a unique transfer request ID.
 
-        :param last_n_blocks: Number of recent blocks to consider.
-        :return: Average block time in seconds.
+        :return: Unique request ID string.
         """
-        with self.lock:
-            blocks = self.ledger.get_last_n_blocks(last_n_blocks)
-            if len(blocks) < 2:
-                self.logger.warning("Not enough blocks to calculate average block time.")
-                return Decimal('0')
+        random_number = secrets.randbelow(10**40)
+        cryptographic_number = f'0r{random_number:040d}'
+        return cryptographic_number
 
-            total_time = Decimal('0')
-            for i in range(1, len(blocks)):
-                prev_block = blocks[i - 1]
-                current_block = blocks[i]
-                block_time = datetime.fromisoformat(current_block.timestamp) - datetime.fromisoformat(prev_block.timestamp)
-                total_time += Decimal(block_time.total_seconds())
+    def get_balance(self, address: str) -> Optional[Decimal]:
+        """
+        Retrieves the OMC balance of a given account.
 
-            average_time = total_time / Decimal(len(blocks) - 1)
-            self.logger.info(f"Average block time over last {last_n_blocks} blocks: {average_time} seconds.")
-            return average_time
+        :param address: The address of the account.
+        :return: OMC balance as Decimal or None if account does not exist.
+        """
+        with self.account_manager.balances_lock:
+            balance = self.account_manager.balances.get(address)
+            if balance is not None:
+                self.logger.debug(f"[OMC] Retrieved balance for {address}: {balance} OMC.")
+            else:
+                self.logger.debug(f"[OMC] Balance for {address} not found.")
+            return balance
 
     # ----------------------------
     # Shutdown Method
@@ -557,3 +706,7 @@ class OMC:
         # Implement any necessary cleanup here
         # For example, persisting state, notifying other components, etc.
         pass  # Placeholder for actual shutdown logic
+
+# Custom Exception for Double Spending
+class DoubleSpendingError(Exception):
+    pass

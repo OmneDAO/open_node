@@ -1,27 +1,24 @@
 # network_manager.py
 
-import os
-import json
-import logging
-import threading
-import time
-import socket
-import hashlib
-from decimal import Decimal
-from typing import List, Dict, Optional
+# network_manager.py
 
-import requests
-from flask import Flask, jsonify, request, Blueprint, abort
-
+from flask import Flask, jsonify, request, Blueprint
 from ledger import Ledger
 from mempool import Mempool
 from class_integrity_verifier import ClassIntegrityVerifier
 from dynamic_fee_calculator import DynamicFeeCalculator
-from omc import OMC
-from block import Block
-from crypto_utils import CryptoUtils
-from consensus_engine import ConsensusEngine
-from merkle import MerkleTree
+from omc import OMC, TransferRequest, DoubleSpendingError
+from account_manager import AccountManager
+from staking import StakingMngr, StakedOMC
+from permissions import PermissionManager
+import logging
+import os
+import threading
+import time
+from functools import wraps
+import requests
+from decimal import Decimal
+
 
 logger = logging.getLogger('NetworkManager')
 
@@ -613,6 +610,468 @@ class NetworkManager:
             with self.ledger.lock:
                 chain_data = [block.to_dict() for block in self.ledger.chain]
             return jsonify({"chain": chain_data}), 200
+        
+        # 7. Accounts Management Endpoints
+        accounts_bp = Blueprint('accounts_bp', __name__)
+        
+        @accounts_bp.route('/api/retrieve_accounts', methods=['GET'])
+        def retrieve_accounts():
+            """
+            Endpoint to retrieve all accounts, staking contracts, and node information.
+            """
+            try:
+                # Pagination parameters
+                page = int(request.args.get('page', 1))
+                per_page = int(request.args.get('per_page', 100))
+
+                # Retrieve account balances
+                all_accounts = self.ledger.account_manager.get_all_accounts()
+                account_items = list(all_accounts.items())
+                start = (page - 1) * per_page
+                end = start + per_page
+                paginated_accounts = dict(account_items[start:end])
+
+                # Retrieve staking contracts with pagination
+                all_staking = self.ledger.staking_manager.get_all_staking_agreements()
+                staking_paginated = all_staking[start:end]
+
+                # Retrieve nodes (assuming manageable size)
+                nodes = self.ledger.verifier.get_all_nodes()
+
+                response_data = {
+                    'data': paginated_accounts,
+                    'staking_accounts': staking_paginated,
+                    'nodes': nodes,
+                    'pagination': {
+                        'page': page,
+                        'per_page': per_page,
+                        'total_accounts': len(all_accounts),
+                        'total_staking': len(all_staking)
+                    }
+                }
+
+                return jsonify(response_data), 200
+            except Exception as e:
+                logger.exception("Exception occurred while retrieving accounts.")
+                return jsonify({"message": "Error retrieving accounts", "error": str(e)}), 500
+            
+        # 7.1. /omc_balance [POST]
+        @accounts_bp.route('/api/omc_balance', methods=['POST'])
+        def get_omc_balance():
+            """
+            Endpoint to check the balance of a wallet's OMC.
+            Expects JSON: { "address": "0zUserAddress123" }
+            """
+            try:
+                data = request.get_json()
+                address = data.get('address')
+                if not address:
+                    return jsonify({"error": "Address not provided"}), 400
+
+                logger.debug(f"Fetching OMC balance for address: {address}")
+                balance = self.ledger.account_manager.get_account_balance(address)
+
+                if balance is not None:
+                    response = {
+                        'message': 'Account balance retrieved successfully',
+                        'balance': str(balance),
+                        'balance_float': float(balance) / (10 ** self.ledger.omc.decimals)
+                    }
+                    logger.debug(f"OMC balance for {address}: {balance}")
+                    return jsonify(response), 200
+                else:
+                    logger.debug(f"Address {address} not found in OMC balances.")
+                    return jsonify({"error": "Account not found"}), 404
+
+            except Exception as e:
+                logger.exception("Error in get_omc_balance endpoint.")
+                return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+        # 7.2. /somc_balance [POST]
+        @accounts_bp.route('/api/somc_balance', methods=['POST'])
+        def get_somc_balance():
+            """
+            Endpoint to check the balance of a wallet's sOMC.
+            Expects JSON: { "address": "0zUserAddress123" }
+            """
+            try:
+                data = request.get_json()
+                address = data.get('address')
+                if not address:
+                    return jsonify({"error": "Address not provided"}), 400
+
+                logger.debug(f"Fetching sOMC balance for address: {address}")
+                balance = self.ledger.staking_manager.staked_omc.get_balance(address)
+
+                if balance is not None:
+                    response = {
+                        'message': 'sOMC balance retrieved successfully',
+                        'balance': str(balance),
+                        'balance_float': float(balance) / (10 ** self.ledger.omc.decimals)
+                    }
+                    logger.debug(f"sOMC balance for {address}: {balance}")
+                    return jsonify(response), 200
+                else:
+                    logger.debug(f"Address {address} not found in sOMC balances.")
+                    return jsonify({"error": "Account not found"}), 404
+
+            except Exception as e:
+                logger.exception("Error in get_somc_balance endpoint.")
+                return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+        # 7.3. /check_activity [POST]
+        @accounts_bp.route('/api/check_activity', methods=['POST'])
+        def check_activity():
+            """
+            Endpoint to check the activity of a wallet.
+            Expects JSON: { "address": "0zUserAddress123" }
+            """
+            try:
+                data = request.get_json()
+                address = data.get('address')
+                if not address:
+                    return jsonify({"error": "Address not provided"}), 400
+
+                logger.debug(f"Checking activity for address: {address}")
+
+                # Initialize result dictionaries for each history type
+                transfer_result = Decimal('0')
+                minting_result = Decimal('0')
+                burning_result = Decimal('0')
+
+                # Check for the address in each history list and calculate the totals
+                # Assuming OMC and StakedOMC maintain transfer_history, minting_history, burning_history
+
+                # Transfer History
+                for transfer in self.ledger.omc.transfer_history:
+                    from_address, to_address, amount = transfer
+                    if from_address == address:
+                        transfer_result -= Decimal(amount)
+                    if to_address == address:
+                        transfer_result += Decimal(amount)
+
+                for transfer in self.ledger.staking_manager.staked_omc.transfer_history:
+                    from_address, to_address, amount = transfer
+                    if from_address == address:
+                        transfer_result -= Decimal(amount)
+                    if to_address == address:
+                        transfer_result += Decimal(amount)
+
+                # Minting History
+                for mint in self.ledger.omc.minting_history:
+                    to_address, amount = mint
+                    if to_address == address:
+                        minting_result += Decimal(amount)
+
+                for mint in self.ledger.staking_manager.staked_omc.minting_history:
+                    to_address, amount = mint
+                    if to_address == address:
+                        minting_result += Decimal(amount)
+
+                # Burning History
+                for burn in self.ledger.omc.burning_history:
+                    amount = burn
+                    burning_result -= Decimal(amount)
+
+                for burn in self.ledger.staking_manager.staked_omc.burning_history:
+                    amount = burn
+                    burning_result -= Decimal(amount)
+
+                # Prepare the response
+                response_data = {
+                    "address": address,
+                    "transfer_history": str(transfer_result),
+                    "minting_history": str(minting_result),
+                    "burning_history": str(burning_result)
+                }
+
+                logger.debug(f"Activity for {address}: {response_data}")
+
+                return jsonify(response_data), 200
+
+            except Exception as e:
+                logger.exception("Error in check_activity endpoint.")
+                return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+        # 7.4. /get_coin_economy [GET]
+        @accounts_bp.route('/api/get_coin_economy', methods=['GET'])
+        def get_coin_economy():
+            """
+            Endpoint to retrieve coin economy data.
+            """
+            try:
+                logger.debug("Fetching coin economy data.")
+
+                # Example economy data structure
+                economy_data = {
+                    "total_coin_supply": str(self.ledger.omc.coin_max),
+                    "total_staked": str(self.ledger.staking_manager.get_total_staked()),
+                    "staked_omc_distributed": str(self.ledger.staking_manager.get_staked_omc_distributed()),
+                    "treasury_balance": str(self.ledger.omc.get_balance(self.ledger.omc.treasury_address))
+                }
+
+                logger.debug(f"Coin economy data: {economy_data}")
+
+                return jsonify({
+                    "message": "Coin economy data retrieved successfully",
+                    "data": economy_data
+                }), 200
+
+            except Exception as e:
+                logger.exception("Error in get_coin_economy endpoint.")
+                return jsonify({"error": "Internal server error", "details": str(e)}), 500
+            
+        # 8. Transfer Management Endpoints
+        transfer_bp = Blueprint('transfer_bp', __name__)
+        
+        # 8.1. /create_transfer_request [POST]
+        @transfer_bp.route('/api/create_transfer_request', methods=['POST'])
+        def create_transfer_request():
+            """
+            Creates a new transfer request.
+            Expects JSON: { "from_address": "...", "to_address": "...", "amount": Decimal, "permission": { "permission": "pending" } }
+            """
+            try:
+                data = request.get_json()
+                from_address = data.get('from_address')
+                to_address = data.get('to_address')
+                amount = data.get('amount')
+                permission = data.get('permission', {'permission': 'pending'})
+
+                # Validate required fields
+                if not all([from_address, to_address, amount]):
+                    return jsonify({"error": "Missing required fields: 'from_address', 'to_address', 'amount'"}), 400
+
+                # Convert amount to Decimal
+                try:
+                    amount_decimal = Decimal(str(amount))
+                except InvalidOperation:
+                    return jsonify({"error": "Invalid amount format."}), 400
+
+                # Create transfer request via OMC
+                transfer_request = self.ledger.omc.create_transfer_request(from_address, to_address, amount_decimal, permission)
+
+                return jsonify({
+                    "message": "Transfer request created successfully",
+                    "request_id": transfer_request.permission['id']
+                }), 200
+
+            except DoubleSpendingError as e:
+                self.logger.error(f"Double spending attempt: {e}")
+                return jsonify({"error": str(e)}), 400
+            except Exception as e:
+                self.logger.exception("Error creating transfer request.")
+                return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+        # 8.2. /approve_transfer_request/<request_id> [POST]
+        @transfer_bp.route('/api/approve_transfer_request/<request_id>', methods=['POST'])
+        def approve_transfer_request(request_id):
+            """
+            Approves a specific transfer request.
+            Expects JSON: { "sender_pub": "...", "permission_sig": "..." }
+            """
+            try:
+                data = request.get_json()
+                sender_pub = data.get('sender_pub')
+                permission_sig = data.get('permission_sig')
+
+                if not all([sender_pub, permission_sig]):
+                    return jsonify({"error": "Missing required fields: 'sender_pub', 'permission_sig'"}), 400
+
+                # Approve transfer request via OMC
+                success = self.ledger.omc.approve_transfer_request(request_id, sender_pub, permission_sig)
+
+                if success:
+                    return jsonify({"message": "Transfer request approved successfully"}), 200
+                else:
+                    return jsonify({"error": "Transfer request not found or already processed"}), 404
+
+            except Exception as e:
+                self.logger.exception("Error approving transfer request.")
+                return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+        # 8.3. /decline_transfer_request/<request_id> [POST]
+        @transfer_bp.route('/api/decline_transfer_request/<request_id>', methods=['POST'])
+        def decline_transfer_request(request_id):
+            """
+            Declines a specific transfer request.
+            """
+            try:
+                success = self.ledger.omc.decline_transfer_request(request_id)
+
+                if success:
+                    return jsonify({"message": "Transfer request declined successfully"}), 200
+                else:
+                    return jsonify({"error": "Transfer request not found or already processed"}), 404
+
+            except Exception as e:
+                self.logger.exception("Error declining transfer request.")
+                return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+        # 8.4. /process_transfer_request/<request_id> [POST]
+        @transfer_bp.route('/api/process_transfer_request/<request_id>', methods=['POST'])
+        def process_transfer_request(request_id):
+            """
+            Processes an approved transfer request.
+            """
+            try:
+                success = self.ledger.omc.process_transfer_request(request_id)
+
+                if success:
+                    return jsonify({"message": "Transfer request processed successfully"}), 200
+                else:
+                    return jsonify({"error": "Failed to process transfer request"}), 400
+
+            except Exception as e:
+                self.logger.exception("Error processing transfer request.")
+                return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+        # 8.5. /get_request/<request_id> [GET]
+        @transfer_bp.route('/api/get_request/<request_id>', methods=['GET'])
+        def get_request(request_id):
+            """
+            Retrieves details of a specific transfer request.
+            """
+            try:
+                transfer_request = self.ledger.omc.get_request_by_id(request_id)
+
+                if transfer_request:
+                    return jsonify({
+                        'from_address': transfer_request.from_address,
+                        'to_address': transfer_request.to_address,
+                        'amount': str(transfer_request.amount),
+                        'permission': transfer_request.permission,
+                        'sender_pub': transfer_request.sender_pub,
+                        'permission_sig': transfer_request.permission_sig,
+                        'timestamp': transfer_request.timestamp.isoformat(),
+                        'status': transfer_request.status
+                    }), 200
+                else:
+                    return jsonify({'error': 'Transfer request not found'}), 404
+
+            except Exception as e:
+                self.logger.exception("Error retrieving transfer request.")
+                return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+        # 8.6. /get_pending_requests/<address> [GET]
+        @transfer_bp.route('/api/get_pending_requests/<address>', methods=['GET'])
+        def get_pending_requests(address):
+            """
+            Retrieves all pending transfer requests for a specific address.
+            """
+            try:
+                pending_requests = self.ledger.omc.get_pending_requests_for_user(address)
+
+                return jsonify(pending_requests), 200
+
+            except Exception as e:
+                self.logger.exception("Error retrieving pending transfer requests.")
+                return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+        # 8.7. /update_request_permissions/<request_id> [POST]
+        @transfer_bp.route('/api/update_request_permissions/<request_id>', methods=['POST'])
+        def update_request_permissions(request_id):
+            """
+            Updates permissions for a specific transfer request.
+            Expects JSON: { "sender_pub": "...", "permission_sig": "...", "permission_approval": "approved" or "declined" }
+            """
+            try:
+                data = request.get_json()
+                sender_pub = data.get('sender_pub')
+                permission_sig = data.get('permission_sig')
+                permission_approval = data.get('permission_approval')
+
+                if not all([sender_pub, permission_sig, permission_approval]):
+                    return jsonify({"error": "Missing required fields: 'sender_pub', 'permission_sig', 'permission_approval'"}), 400
+
+                if permission_approval.lower() not in ['approved', 'declined']:
+                    return jsonify({"error": "Invalid permission_approval value. Must be 'approved' or 'declined'."}), 400
+
+                # Update permissions via OMC
+                success = self.ledger.omc.update_request_permissions(request_id, sender_pub, permission_sig, permission_approval)
+
+                if success:
+                    return jsonify({"message": "Transfer request permissions updated successfully"}), 200
+                else:
+                    return jsonify({"error": "Transfer request not found"}), 404
+
+            except ValueError as e:
+                self.logger.error(f"ValueError: {e}")
+                return jsonify({'error': str(e)}), 400
+            except Exception as e:
+                self.logger.exception("Error updating transfer request permissions.")
+                return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+        # 8.8. /transfer_coins [POST]
+        @transfer_bp.route('/api/transfer_coins', methods=['POST'])
+        def transfer_coins():
+            """
+            Executes a coin transfer based on an approved transfer request.
+            Expects JSON: {
+                "from_address": "...",
+                "to_address": "...",
+                "amount": Decimal,
+                "fee": Decimal,
+                "hash": "request_id",
+                "pub_key": "...",
+                "signature": "...",
+                "sub_type": "...",
+                "type": "..."
+            }
+            """
+            try:
+                data = request.get_json()
+
+                # Extract the relevant data from the request
+                from_address = data.get('from_address')
+                to_address = data.get('to_address')
+                amount = data.get('amount')
+                fee = data.get('fee')
+                hash_id = data.get('hash')
+                pub_key = data.get('pub_key')
+                signature = data.get('signature')
+                sub_type = data.get('sub_type')
+                type = data.get('type')
+
+                # Validate required data
+                if not all([from_address, to_address, amount]):
+                    return jsonify({"error": "Missing required fields: 'from_address', 'to_address', 'amount'"}), 400
+
+                # Convert amount to Decimal
+                try:
+                    amount_decimal = Decimal(str(amount))
+                except InvalidOperation:
+                    return jsonify({"error": "Invalid amount format."}), 400
+
+                # Check if sender has enough balance
+                sender_balance = self.ledger.omc.get_balance(from_address)
+                if sender_balance is None:
+                    return jsonify({"error": f"Sender address {from_address} does not exist."}), 404
+                if sender_balance < amount_decimal:
+                    return jsonify({"error": f"Insufficient balance in {from_address} to transfer {amount} OMC"}), 400
+
+                # Check if the transfer request exists and is approved
+                transfer_request = self.ledger.omc.get_request_by_id(hash_id)
+                if not transfer_request:
+                    return jsonify({"error": "Transfer request not found."}), 404
+                if transfer_request.status != "approved":
+                    return jsonify({"error": f"Transfer request {hash_id} is not approved."}), 403
+
+                # Optionally, verify signature and pub_key here
+
+                # Execute the transfer
+                success = self.ledger.omc.transfer(from_address, to_address, amount_decimal)
+
+                if success:
+                    # Log the transfer
+                    self.logger.info(f"Transfer of {amount_decimal} OMC from {from_address} to {to_address} executed successfully.")
+                    return jsonify({"message": "Transfer executed successfully."}), 200
+                else:
+                    return jsonify({"error": "Failed to execute transfer."}), 400
+
+            except Exception as e:
+                self.logger.exception("Error executing coin transfer.")
+                return jsonify({'error': 'Internal Server Error: Unable to process transfer.'}), 500
 
         # Register Blueprints
         app.register_blueprint(block_bp)
@@ -620,6 +1079,8 @@ class NetworkManager:
         app.register_blueprint(peer_bp)
         app.register_blueprint(consensus_bp)
         app.register_blueprint(health_bp)
+        app.register_blueprint(accounts_bp)
+        app.register_blueprint(transfer_bp)
 
     # ----------------------------------------------------------------
     #  START SERVER METHOD
