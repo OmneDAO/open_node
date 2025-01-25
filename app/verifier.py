@@ -1,4 +1,4 @@
-# ~/app/verifier.py
+# verifier.py
 
 import logging
 import random

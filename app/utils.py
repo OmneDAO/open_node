@@ -1,4 +1,4 @@
-# ~/app/utils.py
+# utils.py
 
 import logging
 import os

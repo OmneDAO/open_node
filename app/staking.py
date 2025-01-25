@@ -1,4 +1,4 @@
-# ~/app/staking.py
+# staking.py
 
 import logging
 from datetime import datetime, timezone, timedelta
@@ -189,28 +189,29 @@ class StakingMngr:
         """
         Retrieves all staking agreements.
 
-        Returns:
-            List[Dict]: A list of all staking agreements.
+        :return: List of staking agreement dictionaries.
         """
         with self.agreements_lock:
             return list(self.staking_agreements)  # Return a shallow copy to prevent external modifications
 
-    def get_total_staked(self) -> float:
+    def get_total_staked(self) -> Decimal:
         """
         Retrieves the total amount staked across all agreements.
 
-        Returns:
-            float: Total staked amount.
+        :return: Total staked amount as Decimal.
         """
-        with self.coin.lock:  # Assuming OMC has its own lock
-            return self.coin.total_staked
+        with self.coin.lock:
+            total = Decimal(self.coin.total_staked)
+            logger.debug(f"[StakingMngr] Total staked: {total} OMC.")
+            return total
 
-    def get_staked_omc_distributed(self) -> float:
+    def get_staked_omc_distributed(self) -> Decimal:
         """
         Retrieves the total amount of StakedOMC distributed.
 
-        Returns:
-            float: Total StakedOMC distributed.
+        :return: Total sOMC distributed as Decimal.
         """
-        with self.staked_omc.lock:  # Assuming StakedOMC has its own lock
-            return self.staked_omc.staked_omc_distributed
+        with self.staked_omc.lock:
+            total = Decimal(self.staked_omc.staked_omc_distributed)
+            logger.debug(f"[StakingMngr] Total sOMC distributed: {total} sOMC.")
+            return total
