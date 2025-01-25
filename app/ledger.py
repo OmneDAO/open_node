@@ -31,7 +31,12 @@ class Ledger:
       - Fork and chain reorganization handling
       - Rollback or block rejection strategies
       - Decentralized in-memory storage
-      - MongoDB integration for persistent storage
+      - MongoDB integration for persistent storage (optional)
+
+    **Reward Distribution:**
+      - Validator: Receives the majority of the block reward.
+      - Miner: Receives a secondary portion of the block reward.
+      - Treasury: Receives the least portion of the block reward.
     """
 
     def __init__(
@@ -69,7 +74,7 @@ class Ledger:
         else:
             from mempool import Mempool  # Import here to prevent circular import
             self.mempool = Mempool(
-                account_manager=self.account_manager,
+                crypto_utils=None,  # Update accordingly if CryptoUtils is required
                 fee_calculator=self.fee_calculator,
                 max_size=1000,
                 min_size=500,
@@ -164,92 +169,109 @@ class Ledger:
     # ----------------------------------------------------------------
     #  Block Production
     # ----------------------------------------------------------------
-    def produce_block(self):
+        def produce_block(self):
+            """
+            Gathers verified transactions from the mempool, uses the consensus engine
+            to determine a validator and miner, builds a block, and attempts to append it to the chain.
+            """
+            # 1. Drain verified transactions
+            transactions = self.mempool.drain_verified_transactions()
+            if not transactions:
+                self.logger.debug("[Ledger] No transactions to include. Aborting block creation.")
+                return
+
+            with self.lock:
+                # 2. Let consensus generate randomness
+                latest_block = self.get_latest_block()
+                new_block = self._create_new_block(transactions, latest_block)
+
+                randomness = self.consensus_engine.produce_randomness(new_block)
+                if randomness is None:
+                    self.logger.error("[Ledger] Failed to produce randomness. Aborting block creation.")
+                    self.mempool.return_transactions(transactions)
+                    return
+
+                # 3. Select validator based on randomness
+                selected_validator = self.consensus_engine.select_validator(randomness)
+                if not selected_validator:
+                    self.logger.error("[Ledger] No validator selected. Aborting block creation.")
+                    self.mempool.return_transactions(transactions)
+                    return
+
+                self.logger.info(f"[Ledger] Selected validator: {selected_validator['address']}")
+
+                # 4. Select miner based on randomness
+                selected_miner = self.consensus_engine.select_miner(randomness)
+                if not selected_miner:
+                    self.logger.error("[Ledger] No miner selected. Aborting block creation.")
+                    self.mempool.return_transactions(transactions)
+                    return
+
+                self.logger.info(f"[Ledger] Selected miner: {selected_miner['address']}")
+
+                # 5. Collect signatures from validator and miner
+                signatures_collected = self._collect_signatures(selected_validator, selected_miner, new_block)
+                if not signatures_collected:
+                    self.logger.error("[Ledger] Failed to collect required signatures. Aborting block creation.")
+                    self.mempool.return_transactions(transactions)
+                    return
+
+                # 6. Verify signatures
+                if not self.verifier.verify_signatures(new_block, new_block.signatures):
+                    self.logger.error("[Ledger] Signature verification failed. Aborting block creation.")
+                    self.mempool.return_transactions(transactions)
+                    return
+
+                # 7. Validate & add block
+                if self._add_block(new_block):
+                    self._finalize_block_transactions(new_block)
+                    self.logger.info(f"[Ledger] Block {new_block.index} added with {len(transactions)} transactions.")
+                else:
+                    # Return transactions if block invalid
+                    self.mempool.return_transactions(transactions)
+                    
+    def _collect_signatures(self, validator: Dict, miner: Dict, block: Block) -> bool:
         """
-        Gathers verified transactions from the mempool, uses the consensus engine
-        to determine a validator, builds a block, and attempts to append it to the chain.
-        """
-        # 1. Drain verified transactions
-        transactions = self.mempool.drain_verified_transactions()
-        if not transactions:
-            self.logger.debug("[Ledger] No transactions to include. Aborting block creation.")
-            return
+        Collects the validator's and miner's signatures for the block.
 
-        with self.lock:
-            # 2. Let consensus generate randomness
-            latest_block = self.get_latest_block()
-            new_block = self._create_new_block(transactions, latest_block)
-
-            randomness = self.consensus_engine.produce_randomness(new_block)
-            if randomness is None:
-                self.logger.error("[Ledger] Failed to produce randomness. Aborting block creation.")
-                self.mempool.return_transactions(transactions)
-                return
-
-            # 3. Select validator based on randomness
-            selected_validator = self.consensus_engine.select_validator(randomness)
-            if not selected_validator:
-                self.logger.error("[Ledger] No validator selected. Aborting block creation.")
-                self.mempool.return_transactions(transactions)
-                return
-
-            self.logger.info(f"[Ledger] Selected validator: {selected_validator['address']}")
-
-            # 4. Collect validator's signature
-            signature = self._collect_validator_signature(selected_validator, new_block)
-            if not signature:
-                self.logger.error("[Ledger] Failed to collect validator's signature. Aborting block creation.")
-                self.mempool.return_transactions(transactions)
-                return
-
-            # 5. Record the validator's signature
-            self.verifier.record_signature(new_block.index, selected_validator['address'], signature)
-
-            # 6. Verify signatures
-            if not self.verifier.verify_signatures(new_block, new_block.signatures):
-                self.logger.error("[Ledger] Signature verification failed. Aborting block creation.")
-                self.mempool.return_transactions(transactions)
-                return
-
-            # 7. Validate & add block
-            if self._add_block(new_block):
-                self._finalize_block_transactions(new_block)
-                self.logger.info(f"[Ledger] Block {new_block.index} added with {len(transactions)} transactions.")
-            else:
-                # Return transactions if block invalid
-                self.mempool.return_transactions(transactions)
-
-    def _collect_validator_signature(self, validator: Dict, block: Block) -> Optional[str]:
-        """
-        Collects the validator's signature for the block.
-        In a real-world scenario, this would involve network communication with the validator.
-
-        :param validator: The validator node's dictionary containing 'address' and other details.
+        :param validator: The validator's information dictionary.
+        :param miner: The miner's information dictionary.
         :param block: The block to be signed.
-        :return: The signature as a string, or None if failed.
+        :return: True if both signatures are collected and verified, False otherwise.
         """
         try:
-            # Placeholder for signature collection logic
-            # For demonstration, we'll assume the validator is part of this node's system
-            # In reality, you would request the validator to sign the block via the network
-            node = self.node  # Assuming self.node represents the current node
-            if validator['address'] != node.address:
-                self.logger.warning(f"Validator {validator['address']} is not the current node. Cannot collect signature.")
-                return None
-
             # Serialize block data
             block_data = block.to_dict()
-            signature = node.sign_node_data(block_data)
-            if signature:
-                self.logger.debug(f"[Ledger] Collected signature from {validator['address']}: {signature}")
-                return signature
-            else:
-                self.logger.error(f"[Ledger] Failed to collect signature from {validator['address']}.")
-                return None
-        except Exception as e:
-            self.logger.error(f"[Ledger] Error collecting signature from validator {validator['address']}: {e}")
-            return None
 
+            # Validator signs the block
+            validator_signature = self.node.sign_node_data(block_data)
+            if not validator_signature:
+                self.logger.error(f"Failed to collect signature from validator {validator['address']}.")
+                return False
+
+            # Miner signs the block
+            miner_signature = self.node.sign_node_data(block_data)
+            if not miner_signature:
+                self.logger.error(f"Failed to collect signature from miner {miner['address']}.")
+                return False
+
+            # Append signatures to the block
+            block.signatures.append({
+                'validator_address': validator['address'],
+                'signature': validator_signature
+            })
+            block.signatures.append({
+                'miner_address': miner['address'],
+                'signature': miner_signature
+            })
+
+            self.logger.debug(f"Collected signatures from validator {validator['address']} and miner {miner['address']}.")
+
+            return True
+        except Exception as e:
+            self.logger.error(f"Error collecting signatures: {e}")
+            return False
+        
     # ----------------------------------------------------------------
     #  Creating & Adding a Block
     # ----------------------------------------------------------------
@@ -359,7 +381,7 @@ class Ledger:
     def _finalize_block_transactions(self, block: Block) -> None:
         """
         Applies each transaction to the AccountManager.
-        Mints block rewards and distributes them to the validator and treasury.
+        Mints block rewards and distributes them to the validator, miner, and treasury.
         Ensures that all transactions are applied atomically.
 
         :param block: The Block instance whose transactions are to be finalized.
@@ -389,23 +411,36 @@ class Ledger:
                 total_fee += fee
 
             # Mint block reward based on total fees
-            minted = self.omc.mint_for_block_fee(total_fee, current_block_height=block.index)
-            validator_addr = block.signatures[-1]['validator_address'] if block.signatures else self.omc.treasury_address  # Fallback to treasury if no validator
-            val_share = minted * Decimal('0.45')
-            treas_share = minted * Decimal('0.35')
-            leftover = minted - val_share - treas_share
+            # Determine validator and miner
+            validator_info = block.signatures[-1] if block.signatures else None
+            validator_address = validator_info['validator_address'] if validator_info else self.omc.treasury_address
 
-            # Credit validator and treasury
-            self.account_manager.credit_account(validator_addr, val_share)
-            self.account_manager.credit_account(self.omc.treasury_address, treas_share)
+            # Select miner using ConsensusEngine
+            miner_info = self.consensus_engine.select_miner()
+            if not miner_info:
+                self.logger.error("Failed to select a miner.")
+                raise ValueError("No miner selected for block reward distribution.")
 
-            self.logger.debug(f"[Ledger] Mined block reward: {minted} OMC distributed as {val_share} to validator and {treas_share} to treasury. Leftover: {leftover} OMC.")
+            miner_address = miner_info['address']
+
+            # Mint rewards
+            minted = self.omc.mint_for_block_fee(
+                total_fee=total_fee,
+                current_block_height=block.index,
+                validator_address=validator_address,
+                miner_address=miner_address
+            )
+
+            self.logger.info(
+                f"[Ledger] Minted rewards: {minted['validator']} OMC to validator, "
+                f"{minted['miner']} OMC to miner, and {minted['treasury']} OMC to treasury."
+            )
 
         except Exception as e:
             self.logger.error(f"[Ledger] Transaction finalization failed for block {block.index}: {e}")
             # In a real-world scenario, implement rollback mechanisms if necessary
             raise e
-
+                
     # ----------------------------------------------------------------
     #  Validation
     # ----------------------------------------------------------------
