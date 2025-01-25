@@ -160,7 +160,7 @@ class OMC:
             self.active_validators.remove(validator_address)
             self.logger.info(f"Validator {validator_address} deregistered successfully.")
             return True
-
+        
     def set_staking_manager(self, staking_manager: StakingMngr):
         """
         Sets the StakingMngr instance to interface with active staking agreements.
@@ -298,15 +298,22 @@ class OMC:
     # ----------------------------
     # Minting and Reward Mechanism
     # ----------------------------
-    def mint_for_block_fee(self, total_fee: Decimal, current_block_height: int, leader_address: str) -> Dict[str, Decimal]:
+    def mint_for_block_fee(
+        self, 
+        total_fee: Decimal, 
+        current_block_height: int, 
+        validator_address: str, 
+        miner_address: str
+    ) -> Dict[str, Decimal]:
         """
         Mints new OMC as block rewards, based on the current block height and halving schedule.
-        Distributes minted coins to the validator and treasury.
+        Distributes minted coins to the validator, miner, and treasury.
 
         :param total_fee: Total fees collected in the block.
         :param current_block_height: The index of the current block.
-        :param leader_address: The address of the leader who proposed the block.
-        :return: Dictionary with minted amounts for 'validator' and 'treasury'.
+        :param validator_address: The address of the validator.
+        :param miner_address: The address of the miner.
+        :return: Dictionary with minted amounts for 'validator', 'miner', and 'treasury'.
         """
         with self.lock:
             # Check if it's time to halve the reward
@@ -316,21 +323,35 @@ class OMC:
             block_reward = self.current_reward
             total_reward = block_reward + total_fee
 
-            # Calculate distribution
-            validator_reward = (total_reward * self.reward_distribution['validator']).quantize(Decimal('0.000000000000000001'))
-            treasury_reward = (total_reward * self.reward_distribution['treasury']).quantize(Decimal('0.000000000000000001'))
+            # Define reward distribution ratios
+            # Example: Validator - 50%, Miner - 30%, Treasury - 20%
+            distribution = {
+                'validator': Decimal('0.5'),
+                'miner': Decimal('0.3'),
+                'treasury': Decimal('0.2')
+            }
+
+            # Calculate individual rewards
+            validator_reward = (total_reward * distribution['validator']).quantize(Decimal('0.000000000000000001'))
+            miner_reward = (total_reward * distribution['miner']).quantize(Decimal('0.000000000000000001')) if miner_address else Decimal('0')
+            treasury_reward = (total_reward * distribution['treasury']).quantize(Decimal('0.000000000000000001'))
 
             # Ensure not exceeding max supply
             if self.total_minted + total_reward > self.coin_max:
                 allowed_reward = self.coin_max - self.total_minted
                 if allowed_reward <= Decimal('0'):
                     self.logger.warning("Max supply reached. No more rewards can be minted.")
-                    return {'validator': Decimal('0.000000000000000000'), 'treasury': Decimal('0.000000000000000000')}
+                    return {
+                        'validator': Decimal('0.000000000000000000'), 
+                        'miner': Decimal('0.000000000000000000'), 
+                        'treasury': Decimal('0.000000000000000000')
+                    }
 
                 # Adjust rewards proportionally
-                validator_reward = (allowed_reward * self.reward_distribution['validator']).quantize(Decimal('0.000000000000000001'))
-                treasury_reward = (allowed_reward * self.reward_distribution['treasury']).quantize(Decimal('0.000000000000000001'))
-                total_reward = validator_reward + treasury_reward
+                validator_reward = (allowed_reward * distribution['validator']).quantize(Decimal('0.000000000000000001'))
+                miner_reward = (allowed_reward * distribution['miner']).quantize(Decimal('0.000000000000000001')) if miner_address else Decimal('0')
+                treasury_reward = (allowed_reward * distribution['treasury']).quantize(Decimal('0.000000000000000001'))
+                total_reward = validator_reward + miner_reward + treasury_reward
                 self.logger.warning(
                     f"Minting adjusted to not exceed max supply. Minted {total_reward} OMC instead of {block_reward + total_fee} OMC."
                 )
@@ -340,14 +361,18 @@ class OMC:
 
             self.logger.info(
                 f"Minted {total_reward} OMC for block {current_block_height}: "
-                f"{validator_reward} OMC to validator + {treasury_reward} OMC to treasury."
+                f"{validator_reward} OMC to validator, {miner_reward} OMC to miner, and {treasury_reward} OMC to treasury."
             )
 
             # Distribute rewards
-            self._distribute_rewards(leader_address, validator_reward, treasury_reward)
+            self._distribute_rewards(validator_address, validator_reward, miner_address, miner_reward, treasury_reward)
 
-            return {'validator': validator_reward, 'treasury': treasury_reward}
-
+            return {
+                'validator': validator_reward, 
+                'miner': miner_reward, 
+                'treasury': treasury_reward
+            }
+            
     def _check_and_halve_reward(self):
         """
         Checks if the halving interval has passed and halves the current block reward if necessary.
@@ -367,26 +392,40 @@ class OMC:
             self.current_reward = new_reward
             self.last_halving_date = now
 
-    def _distribute_rewards(self, validator_address: str, validator_reward: Decimal, treasury_reward: Decimal) -> None:
+    def _distribute_rewards(
+        self, 
+        validator_address: str, 
+        validator_reward: Decimal, 
+        miner_address: str, 
+        miner_reward: Decimal, 
+        treasury_reward: Decimal
+    ) -> None:
         """
-        Distributes the minted rewards to the validator and treasury.
+        Distributes the minted rewards to the validator, miner, and treasury.
 
         :param validator_address: The address of the validator.
         :param validator_reward: Amount to distribute to the validator.
+        :param miner_address: The address of the miner.
+        :param miner_reward: Amount to distribute to the miner.
         :param treasury_reward: Amount to distribute to the treasury.
         """
-        if not validator_address:
-            self.logger.error("No validator address provided for reward distribution.")
-            return
+        # Distribute to validator
+        if validator_address:
+            success_validator = self.account_manager.credit_account(validator_address, validator_reward)
+            if success_validator:
+                self.logger.info(f"Distributed {validator_reward} OMC to validator {validator_address}.")
+            else:
+                self.logger.error(f"Failed to distribute {validator_reward} OMC to validator {validator_address}.")
 
-        # Mint rewards to validator
-        success_validator = self.account_manager.credit_account(validator_address, validator_reward)
-        if success_validator:
-            self.logger.info(f"Distributed {validator_reward} OMC to validator {validator_address}.")
-        else:
-            self.logger.error(f"Failed to distribute {validator_reward} OMC to validator {validator_address}.")
+        # Distribute to miner
+        if miner_address and miner_reward > 0:
+            success_miner = self.account_manager.credit_account(miner_address, miner_reward)
+            if success_miner:
+                self.logger.info(f"Distributed {miner_reward} OMC to miner {miner_address}.")
+            else:
+                self.logger.error(f"Failed to distribute {miner_reward} OMC to miner {miner_address}.")
 
-        # Mint rewards to treasury
+        # Distribute to treasury
         success_treasury = self.account_manager.credit_account(self.treasury_address, treasury_reward)
         if success_treasury:
             self.logger.info(f"Distributed {treasury_reward} OMC to treasury {self.treasury_address}.")
