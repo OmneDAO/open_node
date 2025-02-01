@@ -206,7 +206,7 @@ def main():
     fee_calculator = DynamicFeeCalculator(
         base_fee=Decimal('0.1'),
         fee_multiplier=Decimal('0.05'),
-        size_multiplier=Decimal('0.001'),
+        gas_price_adjustment=Decimal('0.001'),
         type_fee_adjustments={
             'deploy_contract': Decimal('1.0'),
             'execute_contract': Decimal('0.5'),
@@ -220,18 +220,16 @@ def main():
     # Initialize AccountManager
     account_manager = AccountManager()
 
-    # Initialize OMC (Omne Coin) with the steward address
+    # Initialize OMC (Omne Coin) with the treasury address
     omc = OMC(
         account_manager=account_manager,
-        steward_address=STEWARD_ADDRESS,  # Updated parameter name
+        treasury_address=TREASURY_ADDRESS,
         coin_max=Decimal('22000000'),
         minting_rules={
-            'initial_mint': '2200000',  # Initial minting
+            'initial_mint': '2200000',  # Updated initial mint to 2,200,000 OMC
             'block_reward_multiplier': '1.1'
         }
     )
-
-    # Initialize StakedOMC and StakingMngr have been removed as staking is not automatic in open-source mode
 
     # Initialize Mempool with corrected keyword arguments
     mempool = Mempool(
@@ -245,26 +243,27 @@ def main():
         stale_time=3600
     )
 
-    # Initialize Ledger with references to AccountManager, OMC, Fee Calculator, Mempool
+    # Initialize Ledger with references to AccountManager, OMC, Fee Calculator, Mempool, and MongoDB
     ledger = Ledger(
         account_manager=account_manager,
         omc=omc,
         fee_calculator=fee_calculator,
         consensus_engine=None,  # To be set after ConsensusEngine is initialized
         mempool=mempool,
+        mongo_client=mongo_client,
         auto_mine_interval=1
     )
 
     # Initialize Node
     node = Node(
-        address=None,  # Will be generated if not provided
-        stake_weight=1,  # Assuming initial stake weight
-        url=None,  # Will be set dynamically from environment variables
+        address=None,
+        stake_weight=1,
+        url=os.getenv("NODE_URL", "http://localhost:3400"),
         version="0.0.1",
         private_key=VALIDATOR_PRIVATE_KEY,  # Provided via .env
         public_key=crypto_utils.get_public_key_pem(VALIDATOR_PRIVATE_KEY),   # Derived from private key
         signature=None,
-        steward=STEWARD_ADDRESS  # Directly use steward address from env
+        steward=os.getenv("STEWARD_ADDRESS", TREASURY_ADDRESS)
     )
     ledger.node = node  # Assign node to ledger
 
@@ -273,18 +272,39 @@ def main():
     ledger.verifier = verifier  # Assign verifier to ledger
     
     staking_manager = ledger.staking_manager
-    
+
+    # Register the initial validator with an initial stake via AccountManager
+    user_address = TREASURY_ADDRESS  # Assuming treasury is staking
+    validator_address = node.address  # The node's own address
+
+    # Stake coins using AccountManager
+    staking_success = account_manager.stake_coins(
+        address=user_address,
+        node_address=validator_address,
+        amount=Decimal('1000'),
+        min_term=100,
+        pub_key=node.public_key  # Assuming node has a public_key attribute
+    )
+
+    if staking_success:
+        # Now register the validator without the stake parameter
+        omc.register_validator(validator_address)
+        logger.info(f"Validator {validator_address} registered successfully.")
+    else:
+        logger.critical("Staking failed. Cannot register validator.")
+        sys.exit(1)
+
     # Initialize VRFUtils with the validator's VRF private key
     vrf_utils = VRFUtils(private_key_pem=VALIDATOR_VRF_PRIVATE_KEY)
-
+    
     # Initialize ConsensusEngine with references to Ledger, OMC, AccountManager, and VRFUtils
     consensus_engine = ConsensusEngine(
         ledger=ledger,
         omc=omc,
         account_manager=account_manager,
+        staking_manager=staking_manager,
         vrf_utils=vrf_utils,
         blockchain=ledger,  # Pass ledger as the blockchain reference
-        staking_manager=None,  # No staking manager in open-source mode
         randao_commit_duration=60,    # seconds
         randao_reveal_duration=60,    # seconds
         poef_task_difficulty=4,        # leading zeros
@@ -306,9 +326,11 @@ def main():
     network_manager = NetworkManager(
         ledger=ledger,
         mempool=mempool,
+        class_integrity_verifier=ClassIntegrityVerifier(),
         fee_calculator=fee_calculator,
         port=int(os.getenv("PORT_NUMBER", "3400")),
-        omc=omc
+        omc=omc,
+        account_manager=account_manager
     )
 
     # Assign NetworkManager to ConsensusEngine using the setter method

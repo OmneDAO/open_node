@@ -71,6 +71,25 @@ class AccountManager:
         self.on_public_key_updated = Event()
 
         self.logger = logging.info("[AccountManager] Initialized with empty balances, staking contracts, and public keys.")
+        
+    def add_account(self, address: str, initial_balance: Decimal) -> bool:
+        """
+        Adds a new account with the specified address and initial balance.
+        
+        :param address: The address of the new account.
+        :param initial_balance: The initial balance to assign.
+        :return: True if account was added successfully, False if account already exists.
+        """
+        with self.balances_lock:
+            if address in self.balances:
+                logging.info(f"[AccountManager] Account {address} already exists.")
+                return False
+            self.balances[address] = initial_balance
+            logging.info(f"[AccountManager] New account added: {address} with balance {initial_balance} OMC.")
+        
+        # Emit balance update event
+        self.on_balance_updated.emit(address=address, previous_balance=None, new_balance=initial_balance)
+        return True
 
     # ----------------------------
     # Event Subscription Methods
@@ -376,58 +395,3 @@ class AccountManager:
                 logging.error(f"[AccountManager] Staking contract ID {contract_id} not found for term checking.")
                 return False
             return current_block_height >= (contract['start_block'] + contract['min_term'])
-
-    # ----------------------------
-    # Example Usage and Event Handlers
-    # ----------------------------
-    if __name__ == "__main__":
-        # Create an instance of AccountManager
-        account_manager = AccountManager()
-
-        # Define event handlers
-        def handle_balance_update(address, previous_balance, new_balance):
-            logging.info(f"Balance updated for {address}: {previous_balance} -> {new_balance} OMC")
-
-        def handle_staking_contract_creation(contract_id, address, amount, min_term):
-            logging.info(f"Staking Contract Created - ID: {contract_id}, Address: {address}, Amount: {amount} OMC, Min Term: {min_term} blocks")
-
-        def handle_staking_contract_removal(contract_id, address, amount):
-            logging.info(f"Staking Contract Removed - ID: {contract_id}, Address: {address}, Amount: {amount} OMC")
-
-        def handle_public_key_update(address, previous_key, new_key):
-            logging.info(f"Public Key Updated for {address}: {previous_key} -> {new_key}")
-
-        # Subscribe to events
-        account_manager.subscribe_to_balance_updates(handle_balance_update)
-        account_manager.subscribe_to_staking_contract_creation(handle_staking_contract_creation)
-        account_manager.subscribe_to_staking_contract_removal(handle_staking_contract_removal)
-        account_manager.subscribe_to_public_key_updates(handle_public_key_update)
-
-        # Example operations
-        user_address = "0xUserAddress123"
-        validator_address = "0xValidatorAddress456"
-        validator_pub_key = "ValidatorPublicKeyABC"
-
-        # Credit account (e.g., initial funding)
-        account_manager.credit_account(user_address, Decimal('1000'))
-
-        # Stake coins
-        staking_success = account_manager.stake_coins(
-            address=user_address,
-            node_address=validator_address,
-            amount=Decimal('500'),
-            min_term=100,
-            pub_key=validator_pub_key,
-            current_block_height=50  # Example current block height
-        )
-
-        # Attempt to unstake before term is met
-        unstake_success = account_manager.unstake_coins(
-            address=validator_address,
-            contract_id=1,
-            current_block_height=120,  # Example block height after min_term
-            force=False
-        )
-
-        # Add/update public key
-        account_manager.add_validator_public_key(validator_address, "NewValidatorPublicKeyDEF")

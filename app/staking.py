@@ -1,20 +1,24 @@
 # staking.py
 
 import logging
-from datetime import datetime, timezone, timedelta
-import secrets
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Union, List, Dict, Optional
+import threading
 
-import threading  # Import threading for locks
+from omc import OMC
+from account_manager import AccountManager
 
-from omc import OMC  # Ensure correct import path
-from account_manager import AccountManager  # Ensure correct import path
-from staked_omc import StakedOMC  # Assuming you create staked_omc.py
+# Remove the following import to prevent circular dependency
+# from staked_omc import StakedOMC
 
-# Configure logging for the staking module
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('StakingModule')
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+formatter = logging.Formatter('[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s')
+handler.setFormatter(formatter)
+if not logger.handlers:
+    logger.addHandler(handler)
 
 
 class StakedOMC:
@@ -67,30 +71,19 @@ class StakedOMC:
 
 
 class StakingMngr:
-    def __init__(self, coin: OMC, account_manager: AccountManager, staked_omc: StakedOMC):
+    def __init__(self, coin: OMC, account_manager: AccountManager, staked_omc):
         self.staking_accounts: List[Dict] = []
         self.staking_agreements: List[Dict] = []
         self.coin = coin
         self.account_manager = account_manager
         self.staked_omc = staked_omc
 
-        # Initialize locks for thread-safe operations
         self.accounts_lock = threading.Lock()
         self.agreements_lock = threading.Lock()
 
         logger.info("Staking Manager initialized.")
 
     def stake_coins(self, node_address: str, address: str, amount: float, min_term: int, pub_key: str) -> Dict:
-        """
-        Implements the staking logic, allowing users to stake coins on a specific node.
-        
-        :param node_address: Address of the node to stake on.
-        :param address: Address of the user staking the coins.
-        :param amount: Amount of coins to stake.
-        :param min_term: Minimum staking term (e.g., in days).
-        :param pub_key: Public key of the staker.
-        :return: The staking contract details.
-        """
         logger.info(f"Stake on node: {node_address}, address: {address}, amount: {amount}, min_term: {min_term}, pub_key: {pub_key}")
 
         try:
@@ -100,49 +93,42 @@ class StakingMngr:
             logger.error(f"Failed to check balance for staking: {e}")
             raise
 
-        # Generate a unique hexadecimal contract ID for the staking agreement
         contract_id = '0s' + secrets.token_hex(16)
         logger.info(f"Generated contract ID: {contract_id}")
 
-        # Debit the wallet for the staked amount
         try:
-            self.account_manager.debit_account(address, amount)
+            self.account_manager.debit_account(address, Decimal(amount))
         except ValueError as e:
             logger.error(f"Failed to debit wallet for staked coins: {e}")
             raise
 
-        # Create the staking contract
         staking_contract = {
             'contract_id': contract_id,
             'address': address,
-            'amount': amount,
+            'amount': Decimal(amount),
             'min_term': min_term,
             'node_address': node_address,
             'withdrawals': 0,
             'start_date': datetime.now(timezone.utc).isoformat(),
-            'pub_key': pub_key  # Store public key for verification purposes
+            'pub_key': pub_key
         }
 
-        # Append the staking contract to the staked_coins list in OMC
         with self.agreements_lock:
             self.coin.staked_coins.append(staking_contract)
             self.staking_agreements.append(staking_contract)
 
-        # Add the staked amount to the total_staked attribute in OMC
-        with self.coin.lock:  # Assuming OMC has its own lock for thread safety
-            self.coin.total_staked += amount
+        with self.coin.lock:
+            self.coin.total_staked += Decimal(amount)
             logger.info(f"Total staked amount updated: {self.coin.total_staked}")
 
-        # Mint StakedOMC and send them to the wallet
         try:
-            self.staked_omc.mint(address, amount)
+            self.staked_omc.mint(address, Decimal(amount))
         except ValueError as e:
             logger.error(f"Failed to mint staked coins: {e}")
             raise
 
         logger.warning(f"Staked {amount} OMC for {min_term} days successfully. Contract ID: {contract_id}")
 
-        # Return the staking contract to the caller
         return staking_contract
 
     def check_balance_for_staking(self, address: str, amount: Union[int, float]) -> bool:
