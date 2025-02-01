@@ -11,6 +11,7 @@ from omc import OMC, TransferRequest, DoubleSpendingError
 from account_manager import AccountManager
 from staking import StakingMngr, StakedOMC
 from permissions import PermissionManager
+from consensus_engine import ConsensusEngine
 import logging
 import os
 import threading
@@ -18,7 +19,8 @@ import time
 from functools import wraps
 import requests
 from decimal import Decimal
-
+from typing import List, Dict, Optional, Tuple
+import socket
 
 logger = logging.getLogger('NetworkManager')
 
@@ -59,7 +61,8 @@ class NetworkManager:
                  class_integrity_verifier: ClassIntegrityVerifier = None,
                  fee_calculator: DynamicFeeCalculator = None,
                  port: int = 3400,
-                 omc: Optional[OMC] = None):
+                 omc: Optional[OMC] = None,
+                 account_manager: Optional[AccountManager] = None):
         """
         :param ledger: A reference to the Ledger instance
         :param mempool: Reference to the Mempool instance
@@ -73,6 +76,7 @@ class NetworkManager:
         self.class_integrity_verifier = class_integrity_verifier
         self.fee_calculator = fee_calculator
         self.omc = omc
+        self.account_manager = account_manager
 
         self.port = port
         self.peers = set()  # Track known peer URLs
@@ -364,6 +368,35 @@ class NetworkManager:
                 logger.info(f"Successfully broadcasted VRF output to peer: {peer}")
             except requests.exceptions.RequestException as e:
                 logger.error(f"Failed to broadcast VRF output to peer {peer}: {e}")
+                
+    def broadcast_new_account(self, address: str, balance: Decimal, exclude_peer_url: Optional[str] = None):
+        """
+        Broadcasts a new account to all known peers.
+        
+        :param address: The address of the new account.
+        :param balance: The initial balance of the new account.
+        :param exclude_peer_url: The peer URL to exclude from broadcasting (e.g., sender).
+        """
+        with self.lock:
+            current_peers = list(self.peers)
+
+        payload = {
+            'address': address,
+            'balance': str(balance)
+        }
+
+        for peer in current_peers:
+            if exclude_peer_url and peer == exclude_peer_url:
+                continue
+            url = f"{peer}/api/propagate_account"
+            try:
+                response = requests.post(url, json=payload, timeout=5)
+                if response.status_code in [200, 201]:
+                    logger.info(f"Successfully propagated account to {peer}.")
+                else:
+                    logger.warning(f"Failed to propagate account to {peer}. Status Code: {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Error propagating account to {peer}: {e}")
 
     # ----------------------------------------------------------------
     #  CHAIN SYNC METHODS
@@ -613,6 +646,37 @@ class NetworkManager:
         
         # 7. Accounts Management Endpoints
         accounts_bp = Blueprint('accounts_bp', __name__)
+        
+        @accounts_bp.route('/api/propagate_account', methods=['POST'])
+        def propagate_account():
+            """
+            Propagates a new account to the network.
+            Expects JSON: { "address": "0xUserAddress123", "balance": "1000.0" }
+            """
+            data = request.json
+            address = data.get('address')
+            balance = data.get('balance')
+
+            if not address or balance is None:
+                return jsonify({'error': "Missing 'address' or 'balance' in request."}), 400
+
+            try:
+                balance_decimal = Decimal(str(balance))
+            except InvalidOperation:
+                return jsonify({'error': "Invalid balance format."}), 400
+
+            # Check if account already exists
+            if account_manager.get_account_balance(address) is not None:
+                return jsonify({'message': 'Account already exists.'}), 200
+
+            # Add the new account
+            success = account_manager.add_account(address, balance_decimal)
+            if success:
+                # Broadcast the new account to all peers
+                network_manager.broadcast_new_account(address, balance_decimal)
+                return jsonify({'message': 'Account propagated and added successfully.'}), 201
+            else:
+                return jsonify({'error': 'Failed to propagate account.'}), 500
         
         @accounts_bp.route('/api/retrieve_accounts', methods=['GET'])
         def retrieve_accounts():
