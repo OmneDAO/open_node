@@ -1,6 +1,5 @@
 # node.py
 
-import os
 import json
 import hashlib
 import logging
@@ -12,22 +11,12 @@ from mnemonic import Mnemonic
 import ecdsa
 
 class Node:
-    def __init__(self, address: Optional[str] = None, stake_weight: int = 0,
-                 url: Optional[str] = None, version: str = "0.0.1",
-                 private_key: Optional[str] = None, public_key: Optional[str] = None,
+    def __init__(self, address: Optional[str] = None, stake_weight: int = 0, url: str = "http://node1.omne:3400",
+                 version: str = "0.0.1", private_key: Optional[str] = None, public_key: Optional[str] = None,
                  signature: Optional[str] = None, steward: Optional[str] = None):
         self.address = address
         self.stake_weight = stake_weight
-        
-        # Dynamically set URL from environment variable or default to a constructed URL
-        if url:
-            self.url = url
-        else:
-            # Read PORT_NUMBER and NODE_ID from environment variables; default to 3400 and 'node1' if not set
-            port_number = os.getenv('PORT_NUMBER', '3400')
-            node_id = os.getenv('NODE_ID', 'node1')
-            self.url = f"http://{node_id}.omne:{port_number}"
-
+        self.url = url
         self.version = version
         self.private_key = private_key
         self.public_key = public_key

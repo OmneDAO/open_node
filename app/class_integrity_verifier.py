@@ -12,7 +12,7 @@ class ClassIntegrityVerifier:
     """
 
     # URL to fetch known good class hashes
-    HASH_API_URL = "http://hash-api:3000/hashes"
+    HASH_API_URL = "https://trusted-source.omne.io/class-hashes.json"  # Update to your actual trusted source
 
     # Dictionary to hold classes to verify: name -> class type
     classes_to_verify: Dict[str, Type] = {}

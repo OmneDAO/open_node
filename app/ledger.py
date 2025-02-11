@@ -100,7 +100,7 @@ class Ledger:
             staked_omc=self.staked_omc
         )
 
-        self._initialize_genesis_block()
+        # self._initialize_genesis_block()
 
         self.mining_thread = threading.Thread(target=self._mine_new_block_periodically, daemon=True)
         self.mining_thread.start()
