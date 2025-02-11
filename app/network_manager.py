@@ -108,62 +108,74 @@ class NetworkManager:
     #  PEER DISCOVERY METHODS
     # ----------------------------------------------------------------
 
+    def get_local_ip(self) -> str:
+        """
+        Returns the local machine's IP address.
+        """
+        try:
+            # Connect to an external host to force selection of an interface.
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception as e:
+            logging.error(f"Error obtaining local IP: {e}")
+            return "127.0.0.1"
+
     def discover_services(self, prefix: str = "omne", max_range: int = 10) -> List[str]:
         """
         Discovers Omne node services within the Docker network based on a naming convention.
-
-        :param prefix: The prefix used for naming services (default: "omne")
-        :param max_range: The maximum number of services to attempt discovery for
-        :return: List of discovered service names
+        Returns a list of discovered service names.
         """
         discovered_services = []
+        local_ip = self.get_local_ip()
 
         for i in range(1, max_range + 1):
             service_name = f"{prefix}{i}"
             try:
-                service_address = socket.gethostbyname(service_name)
-
-                # Avoid adding self
-                own_hostname = socket.gethostname()
-                own_address = socket.gethostbyname(own_hostname)
-                if service_address != own_address:
+                service_ip = socket.gethostbyname(service_name)
+                # Only add services whose IP is different from our local IP.
+                if service_ip != local_ip:
                     discovered_services.append(service_name)
-                    logging.debug(f"Discovered service: {service_name} at {service_address}")
-
+                    logging.debug(f"Discovered service: {service_name} at {service_ip}")
+                else:
+                    logging.debug(f"Skipping self service: {service_name} with IP {service_ip}")
             except socket.gaierror:
                 logging.debug(f"Service {service_name} not found.")
                 continue
 
         if not discovered_services:
-            logging.warning("No services were discovered during this discovery cycle.")
+            logging.warning("No external services were discovered during this discovery cycle.")
         else:
             logging.info(f"Discovered services: {discovered_services}")
-
         return discovered_services
 
     def ping_services(self, services: List[str], endpoint: str = "api/peer/peers") -> None:
         """
         Pings discovered services to verify their availability and retrieve their node information.
-
-        :param services: List of service names to ping
-        :param endpoint: The API endpoint to ping for retrieving node information
         """
-        current_node_url = self.get_own_url()
-
+        local_ip = self.get_local_ip()
         for service in services:
-            service_base_url = f"http://{service}:{self.port}"
-            service_url = f"{service_base_url}/{endpoint}"
-
-            if service_base_url == current_node_url:
-                logging.debug(f"Skipping self ping: {service_base_url}")
+            try:
+                service_ip = socket.gethostbyname(service)
+            except socket.gaierror:
+                logging.debug(f"Cannot resolve IP for service {service}. Skipping.")
                 continue
 
+            # Skip if the discovered IP is the same as local IP
+            if service_ip == local_ip:
+                logging.debug(f"Skipping ping for local service {service} at {service_ip}")
+                continue
+
+            service_base_url = f"http://{service}:{self.port}"
+            service_url = f"{service_base_url}/{endpoint}"
             logging.debug(f"Attempting to ping {service_url}")
             try:
                 response = requests.get(service_url, timeout=5)
                 if response.status_code == 200:
                     logging.debug(f"Successfully pinged {service_url}")
-                    received_peers = response.json().get('peers', [])  # Adjust based on your API response structure
+                    received_peers = response.json().get('peers', [])
                     for received_peer in received_peers:
                         node_address = received_peer.get('address')
                         if node_address and node_address not in [peer['address'] for peer in self.verifier.nodes]:
@@ -171,9 +183,8 @@ class NetworkManager:
                             logging.debug(f"Added new node: {node_address}")
                 else:
                     logging.debug(f"Failed to ping {service_url}, status code: {response.status_code}")
-
             except requests.exceptions.RequestException as e:
-                logging.error(f"Error pinging {service_url}: {e}")
+                logging.warning(f"Error pinging {service_url}: {e}")
 
     def _peer_discovery_routine(self, interval_seconds: int = 60, prefix: str = "omne", max_range: int = 10):
         """

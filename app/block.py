@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from merkle import MerkleTree  # Importing the updated MerkleTree from merkle.py
+from crypto_utils import DecimalEncoder
 
 # Configure logging for the Block module
 logger = logging.getLogger(__name__)
@@ -67,7 +68,7 @@ class Block:
 
         try:
             # Add all transactions to the Merkle Tree
-            transaction_jsons = [json.dumps(tx, sort_keys=True) for tx in self.transactions]
+            transaction_jsons = [json.dumps(tx, sort_keys=True, cls=DecimalEncoder) for tx in self.transactions]
             self.merkle_tree.add_transactions(transaction_jsons)
             logger.debug(f"Added {len(transaction_jsons)} transactions to Merkle Tree.")
 
@@ -121,7 +122,7 @@ class Block:
                 "merkle_root": self.merkle_root,
                 "leader": self.leader,
                 "proof_of_effort": self.proof_of_effort
-            }, sort_keys=True).encode('utf-8')
+            }, sort_keys=True, cls=DecimalEncoder).encode('utf-8')
 
             block_hash = hashlib.sha256(block_content).hexdigest()
             logger.debug(f"Computed Block Hash: {block_hash}")

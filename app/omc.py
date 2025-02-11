@@ -30,38 +30,17 @@ class TransferRequest:
 
 
 class OMC:
-    """
-    Manages the Omne Coin (OMC) supply, minting, and distribution.
-    Enforces max supply and a time-based halving schedule.
-    Supports dynamic adjustment of reward distribution ratios based on governance or economic feedback.
-    Manages active validators and their network URLs.
-    """
-
     def __init__(
         self,
         account_manager: AccountManager,
         treasury_address: str,
         coin_max: Decimal = Decimal('22000000'),
+        initial_supply: Decimal = Decimal('2200000'),
         initial_reward: Decimal = Decimal('50'),
-        halving_interval_days: int = 1461,  # 4 years accounting for leap years
-        governance_vote_threshold: int = 10,  # Number of votes needed to approve ratio changes
-        minting_rules: Optional[Dict[str, Any]] = None  # Additional minting configurations
+        halving_interval_days: int = 1461,
+        governance_vote_threshold: int = 10,
+        minting_rules: Optional[Dict[str, Any]] = None
     ):
-        """
-        Initializes the OMC class with specified parameters.
-
-        :param account_manager: Instance of AccountManager for managing account balances.
-        :param treasury_address: Address where a portion of minted coins are sent.
-        :param coin_max: Maximum total supply of OMC.
-        :param initial_reward: Initial block reward.
-        :param halving_interval_days: Days after which the block reward halves.
-        :param governance_vote_threshold: Votes required to approve distribution ratio changes.
-        :param minting_rules: Additional minting configurations.
-        """
-
-        # ----------------------------
-        # Logger Initialization
-        # ----------------------------
         self.logger = logging.getLogger('OMC')
         self.logger.setLevel(logging.INFO)
         handler = logging.StreamHandler()
@@ -70,54 +49,35 @@ class OMC:
         if not self.logger.handlers:
             self.logger.addHandler(handler)
 
-        # ----------------------------
-        # Attribute Initialization
-        # ----------------------------
         self.account_manager = account_manager
         self.treasury_address = treasury_address
-        self.coin_max = coin_max
+        self.decimals = 18
+        # Scale the values:
+        self.coin_max = coin_max * (10 ** self.decimals)
+        self.initial_supply = Decimal(initial_supply) * (10 ** self.decimals)
         self.initial_reward = initial_reward
         self.halving_interval = timedelta(days=halving_interval_days)
-        self.staking_manager = None  # To be set via setter method
+        self.staking_manager = None
 
-        self.lock = threading.RLock()  # Reentrant lock to allow nested acquisitions
-
-        # Track the last halving date (network launch date)
+        self.lock = threading.RLock()
         self.last_halving_date = datetime.now(timezone.utc)
-
-        # Current block reward
         self.current_reward = self.initial_reward
-
-        # Total minted coins
         self.total_minted = Decimal('0')
-
-        # Reward distribution ratios
-        # Example: {'validator': Decimal('0.8'), 'treasury': Decimal('0.2')}
         self.reward_distribution: Dict[str, Decimal] = {'validator': Decimal('0.8'), 'treasury': Decimal('0.2')}
-
-        # Governance parameters
         self.governance_vote_threshold = governance_vote_threshold
-        self.pending_ratio_changes: List[Dict[str, Any]] = []  # List of proposed ratio changes
-
-        # Active Validators and their URLs
-        self.active_validators: Set[str] = set()  # Set of active validator IDs (e.g., addresses)
-        self.validator_url_mapping: Dict[str, str] = {}  # Maps validator_id to validator_url
-
-        # Initialize transfer histories
-        self.transfer_history: List[Tuple[str, str, Decimal]] = []  # (from, to, amount)
-        self.minting_history: List[Tuple[str, Decimal]] = []       # (to, amount)
+        self.pending_ratio_changes: List[Dict[str, Any]] = []
+        self.active_validators: Set[str] = set()
+        self.validator_url_mapping: Dict[str, str] = {}
+        self.transfer_history: List[Tuple[str, str, Decimal]] = []
+        self.minting_history: List[Tuple[str, Decimal]] = []
         self.burning_history: List[Decimal] = []
-
-        # Initialize transfer request queue
         self.request_queue = queue.Queue()
 
-        # Initialize logger before processing minting rules
         self.logger.info(
             f"OMC initialized with max supply {self.coin_max} OMC, initial reward {self.initial_reward} OMC per block."
         )
         self.logger.info(f"Initial reward distribution: {self.reward_distribution}")
 
-        # Process minting_rules if provided
         if minting_rules:
             self._process_minting_rules(minting_rules)
 
@@ -320,6 +280,18 @@ class OMC:
     # ----------------------------
     # Minting and Reward Mechanism
     # ----------------------------
+    def mint_coins_and_send(self, address: str, amount: Decimal) -> None:
+        self.logger.info(f"mint_coins_and_send called with address {address} and amount {amount}")
+        if self.total_minted + amount > self.coin_max:
+            self.logger.warning("Max supply reached. Cannot mint more coins.")
+            return
+        success = self.account_manager.credit_account(address, amount)
+        if success:
+            self.total_minted += amount
+            self.logger.info(f"Minted {amount} OMC and sent to {address}.")
+        else:
+            self.logger.error(f"Failed to credit {amount} OMC to {address}.")
+                    
     def mint_for_block_fee(
         self, 
         total_fee: Decimal, 

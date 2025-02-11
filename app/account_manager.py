@@ -8,6 +8,7 @@ from threading import Lock, RLock
 # Initialize logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
+logger = logging.getLogger('AccountManager')
 
 class Event:
     """
@@ -69,8 +70,6 @@ class AccountManager:
         self.on_staking_contract_created = Event()
         self.on_staking_contract_removed = Event()
         self.on_public_key_updated = Event()
-
-        self.logger = logging.info("[AccountManager] Initialized with empty balances, staking contracts, and public keys.")
         
     def add_account(self, address: str, initial_balance: Decimal) -> bool:
         """
