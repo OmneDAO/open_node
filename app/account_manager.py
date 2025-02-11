@@ -71,6 +71,16 @@ class AccountManager:
         self.on_staking_contract_removed = Event()
         self.on_public_key_updated = Event()
         
+    def get_all_accounts(self) -> Dict[str, Decimal]:
+        """
+        Retrieves a dictionary of all account balances.
+
+        :return: A dictionary mapping account addresses to their balances.
+        """
+        with self.balances_lock:
+            # Return a shallow copy to avoid external modifications
+            return dict(self.balances)
+        
     def add_account(self, address: str, initial_balance: Decimal) -> bool:
         """
         Adds a new account with the specified address and initial balance.
