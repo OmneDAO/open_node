@@ -51,7 +51,10 @@ class OMC:
 
         self.account_manager = account_manager
         self.treasury_address = treasury_address
+        self.name = 'Omne Coin'
+        self.symbol = 'OMC'
         self.decimals = 18
+        self.image = "https://bafkreidygcfusnh6kilszq7be3j33f4t4hzxcimkgpmhkrxw4v23endhbu.ipfs.w3s.link/"
         # Scale the values:
         self.coin_max = coin_max * (10 ** self.decimals)
         self.initial_supply = Decimal(initial_supply) * (10 ** self.decimals)
