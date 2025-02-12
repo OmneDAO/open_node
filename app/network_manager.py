@@ -3,6 +3,7 @@
 # network_manager.py
 
 from flask import Flask, jsonify, request, Blueprint
+from flask_cors import CORS, cross_origin
 from ledger import Ledger
 from mempool import Mempool
 from class_integrity_verifier import ClassIntegrityVerifier
@@ -18,7 +19,7 @@ import threading
 import time
 from functools import wraps
 import requests
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import List, Dict, Optional, Tuple
 import socket
 
@@ -29,6 +30,7 @@ logger = logging.getLogger('NetworkManager')
 # ----------------------------------------------------------------
 
 app = Flask(__name__)
+CORS(app)
 
 def setup_logging():
     logging.basicConfig(
@@ -658,6 +660,77 @@ class NetworkManager:
         # 7. Accounts Management Endpoints
         accounts_bp = Blueprint('accounts_bp', __name__)
         
+        @accounts_bp.route('/api/get_transactions_for_address', methods=['GET'])
+        def get_transactions_for_address():
+            """
+            Retrieves all transactions related to a given wallet address.
+            This includes mined (on‑chain) transactions as well as pending transactions.
+            """
+            wallet_address = request.args.get('address')
+            if not wallet_address:
+                return jsonify({"error": "Wallet address is required"}), 400
+
+            address_transactions = {
+                'mined_transactions': [],
+                'pending_transactions': [],
+                'cleaned_transactions': [],
+                'verified_transactions': [],
+                'confirmed_transactions': []
+            }
+
+            # --- Mined Transactions ---
+            # Iterate over all blocks in the ledger’s chain.
+            # (Assumes that each block is either a dictionary or a Block instance with a to_dict() method.)
+            ledger = app.config.get("LEDGER")  # Assuming you have stored the ledger reference in Flask's config
+            if ledger is None:
+                logging.error("Ledger not configured in Flask app context.")
+                return jsonify({"error": "Server misconfiguration"}), 500
+
+            for block in ledger.chain:
+                if hasattr(block, "to_dict"):
+                    block_data = block.to_dict()
+                else:
+                    block_data = block
+                for tx in block_data.get('transactions', []):
+                    # Check if the wallet address is the sender or (if present) the recipient.
+                    if tx.get('sender') == wallet_address or tx.get('recipient') == wallet_address:
+                        address_transactions['mined_transactions'].append(tx)
+
+            # --- Pending Transactions ---
+            # Assume pending transactions are stored in the mempool.
+            mempool = ledger.mempool  # We assume the ledger has a reference to the mempool.
+            pending = getattr(mempool, "transactions", [])
+            address_transactions['pending_transactions'] = [
+                tx for tx in pending
+                if tx.get('sender') == wallet_address or tx.get('recipient') == wallet_address
+            ]
+
+            # --- Verified/Confirmed/Cleaned Transactions ---
+            # For now, if these lists are not implemented, return empty arrays.
+            address_transactions['verified_transactions'] = []
+            address_transactions['confirmed_transactions'] = []
+            address_transactions['cleaned_transactions'] = []
+
+            return jsonify(address_transactions), 200
+        
+        @accounts_bp.route('/api/omc_info', methods=['GET'])
+        def omc_info():
+            """
+            Returns basic information about the Omne coin (OMC).
+            """
+            ledger = app.config.get("LEDGER")
+            if ledger is None or not hasattr(ledger, "omc"):
+                logging.error("OMC not configured in ledger.")
+                return jsonify({"error": "Server misconfiguration"}), 500
+
+            coin_info = {
+                'name': ledger.omc.name,
+                'symbol': ledger.omc.symbol,
+                'decimals': ledger.omc.decimals,
+                'image': ledger.omc.image
+            }
+            return jsonify(coin_info), 200
+        
         @accounts_bp.route('/api/propagate_account', methods=['POST'])
         def propagate_account():
             """
@@ -677,14 +750,14 @@ class NetworkManager:
                 return jsonify({'error': "Invalid balance format."}), 400
 
             # Check if account already exists
-            if account_manager.get_account_balance(address) is not None:
+            if self.account_manager.get_account_balance(address) is not None:
                 return jsonify({'message': 'Account already exists.'}), 200
 
             # Add the new account
-            success = account_manager.add_account(address, balance_decimal)
+            success = self.account_manager.add_account(address, balance_decimal)
             if success:
                 # Broadcast the new account to all peers
-                network_manager.broadcast_new_account(address, balance_decimal)
+                self.broadcast_new_account(address, balance_decimal)
                 return jsonify({'message': 'Account propagated and added successfully.'}), 201
             else:
                 return jsonify({'error': 'Failed to propagate account.'}), 500
