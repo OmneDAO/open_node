@@ -12,6 +12,8 @@ import queue  # Import queue for handling transfer requests
 # Import AccountManager from account_manager.py
 from account_manager import AccountManager
 
+from staking import StakingMngr, StakedOMC
+
 # Set decimal precision higher to handle financial calculations accurately
 getcontext().prec = 28
 getcontext().rounding = ROUND_DOWN

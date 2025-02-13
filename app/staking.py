@@ -1,16 +1,17 @@
 # staking.py
 
+from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Union, List, Dict, Optional
+from typing import Union, List, Dict, Optional, TYPE_CHECKING
 import threading
 
 from omc import OMC
 from account_manager import AccountManager
 
-# Remove the following import to prevent circular dependency
-# from staked_omc import StakedOMC
+if TYPE_CHECKING:
+    from omc import OMC
 
 logger = logging.getLogger('StakingModule')
 logger.setLevel(logging.INFO)
