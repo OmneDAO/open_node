@@ -74,6 +74,7 @@ class NetworkManager:
         :param omc: Reference to the OMC instance for staking and reward management
         """
         self.ledger = ledger
+        app.config["LEDGER"] = ledger
         self.mempool = mempool
         self.class_integrity_verifier = class_integrity_verifier
         self.fee_calculator = fee_calculator
