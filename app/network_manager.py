@@ -1,9 +1,8 @@
 # network_manager.py
 
-# network_manager.py
-
 from flask import Flask, jsonify, request, Blueprint
 from flask_cors import CORS, cross_origin
+from datetime import datetime, timezone, date
 from ledger import Ledger
 from mempool import Mempool
 from class_integrity_verifier import ClassIntegrityVerifier
@@ -13,6 +12,7 @@ from account_manager import AccountManager
 from staking import StakingMngr, StakedOMC
 from permissions import PermissionManager
 from consensus_engine import ConsensusEngine
+from crypto_utils import DecimalEncoder
 import logging
 import os
 import threading
@@ -22,6 +22,7 @@ import requests
 from decimal import Decimal, InvalidOperation
 from typing import List, Dict, Optional, Tuple
 import socket
+import json
 
 logger = logging.getLogger('NetworkManager')
 
@@ -419,18 +420,28 @@ class NetworkManager:
     def request_chain_sync(self, peer_url: str):
         """
         Requests a full chain from a peer and adopts it if it's longer and valid.
-
-        :param peer_url: The URL of the peer to request the chain from
+        
+        This function makes a GET request to the peer's /api/block/full_chain endpoint.
+        It then reserializes the response using json.dumps with DecimalEncoder to ensure
+        that all Decimal values (like fees) are formatted in fixed‑point notation rather than
+        scientific notation. Finally, it validates and, if appropriate, adopts the new chain.
+        
+        :param peer_url: The URL of the peer to request the chain from.
         """
         try:
             url = f"{peer_url}/api/block/full_chain"
             response = requests.get(url, timeout=10)
             if response.status_code == 200:
-                chain_data = response.json().get('chain', [])
+                # Get the JSON response from the peer
+                original_data = response.json()
+                # Re-serialize using our custom DecimalEncoder to enforce fixed‑point formatting
+                chain_str = json.dumps(original_data, cls=DecimalEncoder)
+                # Then parse the string back to a dictionary
+                chain_data = json.loads(chain_str).get('chain', [])
                 if len(chain_data) > len(self.ledger.chain):
-                    # Validate the fetched chain
+                    # Validate the fetched chain using the ledger's full-chain validator
                     if self.ledger.validate_full_chain(chain_data):
-                        # Adopt the new chain
+                        # Adopt the new chain if it's valid and longer
                         if self.ledger.adopt_new_chain(chain_data):
                             logger.info(f"Adopted new chain from {peer_url}, length={len(chain_data)}.")
                             return
@@ -1221,6 +1232,72 @@ class NetworkManager:
             except Exception as e:
                 self.logger.exception("Error executing coin transfer.")
                 return jsonify({'error': 'Internal Server Error: Unable to process transfer.'}), 500
+            
+        # 9. STAKING MANAGEMENT ENDPOINTS
+        staking_bp = Blueprint('staking_bp', __name__)
+        
+        # 9.1 /stake_coins [POST]
+        @staking_bp.route('/api/stake_coins', methods=['POST'])
+        def stake_coins():
+            """
+            Endpoint to stake coins.
+            Expects JSON:
+            {
+            "node_address": "node-address",
+            "address": "user-address",
+            "amount": <number>,
+            "min_term": <number>,
+            "pub_key": "public-key"
+            }
+            """
+            try:
+                data = request.get_json()
+                node_address = data.get('node_address')
+                address = data.get('address')
+                amount = data.get('amount')
+                min_term = data.get('min_term')
+                pub_key = data.get('pub_key')
+                if not all([node_address, address, amount, min_term, pub_key]):
+                    return jsonify({"error": "Missing required fields"}), 400
+
+                # Convert amount to float (the staking method expects a float for amount)
+                amount_float = float(amount)
+                staking_contract = self.ledger.staking_manager.stake_coins(node_address, address, amount_float, int(min_term), pub_key)
+                return jsonify({"message": "Staking contract created successfully", "staking_contract": staking_contract}), 200
+            except Exception as e:
+                logger.exception("Error creating staking contract.")
+                return jsonify({"error": "Internal server error", "details": str(e)}), 500
+        
+        # 9.2 /unstake_coins [POST]
+        @staking_bp.route('/api/unstake_coins', methods=['POST'])
+        def unstake_coins():
+            """
+            Endpoint to unstake coins.
+            Expects JSON:
+            {
+            "address": "user-address",
+            "contract_id": "staking-contract-id",
+            "current_block_height": <number> (optional, default 0),
+            "force": <boolean> (optional, default False)
+            }
+            """
+            try:
+                data = request.get_json()
+                address = data.get('address')
+                contract_id = data.get('contract_id')
+                current_block_height = data.get('current_block_height', 0)
+                force = data.get('force', False)
+                if not all([address, contract_id]):
+                    return jsonify({"error": "Missing required fields: address and contract_id"}), 400
+
+                success = self.ledger.staking_manager.unstake_coins(address, contract_id, int(current_block_height), bool(force))
+                if success:
+                    return jsonify({"message": "Unstake operation successful"}), 200
+                else:
+                    return jsonify({"error": "Unstake operation failed"}), 400
+            except Exception as e:
+                logger.exception("Error processing unstake request.")
+                return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
         # Register Blueprints
         app.register_blueprint(block_bp)

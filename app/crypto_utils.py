@@ -2,6 +2,7 @@ import logging
 import json
 import base64
 import hashlib
+from datetime import datetime, timezone, date
 from typing import Any
 from decimal import Decimal
 from cryptography.hazmat.primitives import serialization, hashes
@@ -11,12 +12,12 @@ from cryptography.hazmat.primitives.asymmetric import ec  # for PEM keys
 # Use the ecdsa library for hex‐encoded keys
 from ecdsa import SigningKey, VerifyingKey, SECP256k1, BadSignatureError
 
-# A JSON encoder that converts Decimals to strings.
+# Define a DecimalEncoder if needed for JSON serialization.
 class DecimalEncoder(json.JSONEncoder):
-    def default(self, o):
-        if isinstance(o, Decimal):
-            return str(o)
-        return super().default(o)
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return format(obj, 'f')  # Force fixed-point format
+        return super().default(obj)
 
 class CryptoUtils:
     """

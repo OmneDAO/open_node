@@ -1,12 +1,14 @@
-# staked_omc.py
-
 import logging
+import secrets
+from datetime import datetime, timezone, date
+import hashlib
+import json
 from decimal import Decimal
 from threading import Lock
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional
 
 from crypto_utils import CryptoUtils  # Ensure CryptoUtils is correctly implemented
-
+from dynamic_fee_calculator import DynamicFeeCalculator
 
 logger = logging.getLogger('StakedOMC')
 logger.setLevel(logging.INFO)
@@ -16,6 +18,12 @@ handler.setFormatter(formatter)
 if not logger.handlers:
     logger.addHandler(handler)
 
+# Define a DecimalEncoder if needed for JSON serialization.
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return format(obj, 'f')  # Force fixed-point format
+        return super().default(obj)
 
 class StakedOMC:
     """
@@ -23,10 +31,10 @@ class StakedOMC:
     """
     def __init__(
         self,
-        account_manager, 
-        ledger=None,  # Optional: Pass ledger if needed
-        verifier=None,  # Optional: Pass verifier if needed
-        treasury_address: str = "0z0000000000000000000000000000000000000000",
+        account_manager,
+        ledger=None,      # Optional: Pass ledger if needed
+        verifier=None,    # Optional: Pass verifier if needed
+        treasury_address: str = "0z0ab101730c12632a805bf2dcf0762719ccebfd1b",
         treasury_private_key: str = "",
         decimals: int = 18
     ):
@@ -42,7 +50,10 @@ class StakedOMC:
         self.ledger = ledger
         self.verifier = verifier
         self.crypto_utils = CryptoUtils()
+        self.name = 'Staked Omne Coin'
+        self.symbol = 'sOMC'
         self.decimals = decimals
+        self.image = "https://w3s.link/ipfs/bafybeiddmhq5tbcm3qxnzgwov5lzoeq4agc4zgjecs3ucvmjv3cqfbs4ii"
         self.treasury_address = treasury_address
         self.treasury_private_key = treasury_private_key
         self.balance: Dict[str, Decimal] = {}
@@ -79,8 +90,8 @@ class StakedOMC:
             self.balance[recipient] += amount_with_decimals
             self.staked_omc_distributed += amount_with_decimals
 
-            # Update the account balance via AccountManager
-            self.account_manager.credit_account(recipient, amount_with_decimals)
+            # Update the sOMC balance using the provided AccountManager
+            self.account_manager.credit_account(recipient, amount_with_decimals, token="sOMC")
 
         self.logger.info(f"[StakedOMC] Minted {amount_with_decimals} sOMC to {recipient}. Total distributed: {self.staked_omc_distributed}")
         return True
@@ -105,40 +116,15 @@ class StakedOMC:
                 self.logger.error("Insufficient balance for burning")
                 raise ValueError("Insufficient balance for burning")
 
-            # Send the staked coins to the burn address
+            # Deduct the staked coins and add them to the burn address.
             self.balance[address] -= amount_with_decimals
             self.balance[self.burn_address] = self.balance.get(self.burn_address, Decimal('0')) + amount_with_decimals
             self.staked_omc_distributed -= amount_with_decimals
 
             self.logger.info(f"[StakedOMC] Burned {amount_with_decimals} sOMC from {address} to burn address. Total distributed: {self.staked_omc_distributed}")
 
-            # Create and add burn transaction to mempool
-            burn_tx = {
-                'type': 'burn',
-                'sender': address,
-                'receiver': self.burn_address,
-                'amount': float(amount),
-                'fee': '0',  # Assuming burn transactions have no fee
-                'nonce': self.account_manager.get_next_nonce(address),
-                'signature': '',  # To be filled after signing
-                'public_key': self.crypto_utils.get_public_key(address),  # Assuming address can provide its public key
-                'timestamp': datetime.now(timezone.utc).isoformat()
-            }
-
-            # Sign the burn transaction
-            burn_tx['signature'] = self.crypto_utils.sign_message(self.treasury_private_key, burn_tx['hash'])
-
-            # Add transaction to mempool
-            if self.ledger and self.ledger.mempool:
-                success = self.ledger.mempool.add_transaction(burn_tx)
-                if success:
-                    self.logger.info(f"[StakedOMC] Burn transaction added to mempool: {burn_tx['hash']}")
-                else:
-                    self.logger.error(f"[StakedOMC] Failed to add burn transaction to mempool: {burn_tx['hash']}")
-                    return False
-            else:
-                self.logger.error("[StakedOMC] Ledger or Mempool not initialized. Cannot add burn transaction.")
-                return False
+            # (Optional) Create and add a burn transaction to the mempool if required.
+            # ...
 
         return True
 
@@ -160,13 +146,106 @@ class StakedOMC:
     def transfer(self, from_address: str, to_address: str, amount: Decimal) -> None:
         """
         Transfer of staked coins between stakers is prohibited.
-
-        :param from_address: Address sending the sOMC.
-        :param to_address: Address receiving the sOMC.
-        :param amount: Amount of sOMC to transfer.
-        :raises ValueError: Always, since transfers are prohibited.
         """
         raise ValueError("StakedCoin transfer between stakers is prohibited")
+    
+    def create_staking_transaction(self, treasury_address: str, treasury_public_key: str, treasury_private_key: str, omc_initial_supply: Decimal, fee_calculator: DynamicFeeCalculator) -> Optional[Dict]:
+        """
+        Creates a staking transaction representing the staking contract.
+        This transaction can then be included in a block.
+        """
+        min_term = 200
+        reduced_balance = int(omc_initial_supply * Decimal('0.05'))
+        contract_id = '0s' + secrets.token_hex(16)
+        
+        staking_tx = {
+            'stake_id': contract_id,
+            'address': treasury_address,
+            'amount': reduced_balance,
+            'min_term': min_term,
+            'node_address': None,  # To be determined; could be set later by the consensus/validator selection
+            'withdrawals': 0,
+            'start_date': str(datetime.now(timezone.utc)),
+            'type': 'c',  # or use a special type for staking transactions
+            'public_key': treasury_public_key,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'sender': treasury_address,
+            'fee': 0.0  # Will be calculated below
+        }
+        
+        # Determine the node address. This might come from the consensus engine or verifier.
+        # For example, if no validator is selected yet, you might default to the current node.
+        # (In your initializer you already do something like this.)
+        staking_tx['node_address'] = self.ledger.node.address  # example fallback
+        
+        # Calculate fee for the staking transaction using the staking transaction dictionary directly
+        fee = fee_calculator.get_dynamic_fee(staking_tx, 0, 100)
+        staking_tx['fee'] = format(fee, 'f')
+
+        # Create a canonical payload and compute the hash
+        sorted_data = {k: staking_tx[k] for k in sorted(staking_tx) if k not in ['signature', 'hash']}
+        payload = json.dumps(sorted_data, sort_keys=True, cls=DecimalEncoder).encode()
+        staking_tx['hash'] = hashlib.sha256(payload).hexdigest()
+        
+        # Sign the staking transaction using the treasury private key
+        try:
+            payload_dict = json.loads(payload.decode('utf-8'))
+            staking_tx['signature'] = CryptoUtils().sign_message(treasury_private_key, payload_dict)
+        except Exception as e:
+            logger.error(f"Failed to sign staking transaction: {e}")
+            return None
+        
+        # Validate required fields before returning
+        required_fields = ['hash', 'timestamp', 'sender', 'fee', 'signature', 'public_key']
+        missing = [field for field in required_fields if field not in staking_tx or staking_tx[field] is None]
+        if missing:
+            logger.error(f"Staking transaction validation failed. Missing: {missing}")
+            return None
+        
+        return staking_tx
+    
+    def create_somc_mint_transaction(self,
+                                 recipient: str,
+                                 mint_amount: Decimal,
+                                 fee_calculator: DynamicFeeCalculator,
+                                 treasury_public_key: str,
+                                 treasury_private_key: str) -> Optional[Dict]:
+        """
+        Creates a transaction to record the minting of sOMC tokens to the recipient.
+        This transaction will be included on-chain.
+        """
+        tx = {
+            'address': recipient,  # The recipient wallet receiving sOMC
+            'balance': mint_amount,  # The minted sOMC amount (already adjusted for decimals)
+            'type': 'somc_mint',  # Use a specific type for sOMC minting transactions
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'withdrawals': 0,
+            'fee': 0.0,  # Fee will be computed below
+            'sender': self.treasury_address,  # The treasury is issuing these tokens
+            'public_key': treasury_public_key,
+        }
+        # Calculate fee for the transaction
+        fee = fee_calculator.get_dynamic_fee(tx, 0, 100)
+        tx['fee'] = format(fee, 'f')
+        # Build canonical payload and compute transaction hash
+        sorted_data = {k: tx[k] for k in sorted(tx) if k not in ['signature', 'hash']}
+        payload = json.dumps(sorted_data, sort_keys=True, cls=DecimalEncoder).encode()
+        tx['hash'] = hashlib.sha256(payload).hexdigest()
+        # Sign the transaction using the treasury private key
+        try:
+            payload_dict = json.loads(payload.decode('utf-8'))
+            tx['signature'] = CryptoUtils().sign_message(treasury_private_key, payload_dict)
+        except Exception as e:
+            logger.error(f"Failed to sign sOMC mint transaction: {e}")
+            return None
+        # Validate that all required fields are present
+        required_fields = ['hash', 'timestamp', 'sender', 'fee', 'signature', 'public_key']
+        missing = [field for field in required_fields if field not in tx or tx[field] is None]
+        if missing:
+            logger.error(f"sOMC mint transaction validation failed. Missing: {missing}")
+            return None
+        logger.info(f"sOMC mint transaction created successfully: {tx}")
+        return tx
 
     def shutdown(self):
         """

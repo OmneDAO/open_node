@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import logging
+import secrets
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Union, List, Dict, Optional, TYPE_CHECKING
@@ -9,6 +10,7 @@ import threading
 
 from omc import OMC
 from account_manager import AccountManager
+from staked_omc import StakedOMC
 
 if TYPE_CHECKING:
     from omc import OMC
@@ -72,7 +74,7 @@ class StakedOMC:
 
 
 class StakingMngr:
-    def __init__(self, coin: OMC, account_manager: AccountManager, staked_omc):
+    def __init__(self, coin: OMC, account_manager: AccountManager, staked_omc: StakedOMC):
         self.staking_accounts: List[Dict] = []
         self.staking_agreements: List[Dict] = []
         self.coin = coin
@@ -86,11 +88,10 @@ class StakingMngr:
 
     def stake_coins(self, node_address: str, address: str, amount: float, min_term: int, pub_key: str) -> Dict:
         logger.info(f"Stake on node: {node_address}, address: {address}, amount: {amount}, min_term: {min_term}, pub_key: {pub_key}")
-
         try:
-            if not self.check_balance_for_staking(address, amount):
+            if not self.account_manager.get_account_balance(address) >= Decimal(amount):
                 raise ValueError("Insufficient balance for staking")
-        except ValueError as e:
+        except Exception as e:
             logger.error(f"Failed to check balance for staking: {e}")
             raise
 
@@ -99,7 +100,7 @@ class StakingMngr:
 
         try:
             self.account_manager.debit_account(address, Decimal(amount))
-        except ValueError as e:
+        except Exception as e:
             logger.error(f"Failed to debit wallet for staked coins: {e}")
             raise
 
@@ -110,12 +111,12 @@ class StakingMngr:
             'min_term': min_term,
             'node_address': node_address,
             'withdrawals': 0,
-            'start_date': datetime.now(timezone.utc).isoformat(),
-            'pub_key': pub_key
+            'start_block': 0,  # You could pass the current block height here
+            'pub_key': pub_key,
+            'start_date': datetime.now(timezone.utc).isoformat()
         }
 
         with self.agreements_lock:
-            self.coin.staked_coins.append(staking_contract)
             self.staking_agreements.append(staking_contract)
 
         with self.coin.lock:
@@ -124,13 +125,58 @@ class StakingMngr:
 
         try:
             self.staked_omc.mint(address, Decimal(amount))
-        except ValueError as e:
+        except Exception as e:
             logger.error(f"Failed to mint staked coins: {e}")
             raise
 
-        logger.warning(f"Staked {amount} OMC for {min_term} days successfully. Contract ID: {contract_id}")
-
+        logger.info(f"Staked {amount} OMC for {min_term} days successfully. Contract ID: {contract_id}")
         return staking_contract
+
+    def unstake_coins(self, address: str, contract_id: str, current_block_height: int = 0, force: bool = False) -> bool:
+        """
+        Unstakes coins from a staking contract managed by this staking manager.
+
+        :param address: The address that staked coins.
+        :param contract_id: The contract ID of the staking agreement.
+        :param current_block_height: The current block height (used to check minimum term).
+        :param force: If True, force unstake even if the minimum term is not met.
+        :return: True if unstaking was successful, False otherwise.
+        """
+        with self.agreements_lock:
+            # Find the agreement by contract_id
+            contract = next((c for c in self.staking_agreements if c.get('contract_id') == contract_id), None)
+            if not contract:
+                logger.error(f"Staking contract ID {contract_id} not found.")
+                return False
+
+            if contract['address'] != address:
+                logger.error(f"Address mismatch for contract ID {contract_id}. Expected {contract['address']}, got {address}.")
+                return False
+
+            # Check minimum term if not forced
+            # Assume min_term is expressed in blocks; you could also compute using start_date if needed
+            if not force and current_block_height < contract['start_block'] + contract['min_term']:
+                remaining = (contract['start_block'] + contract['min_term']) - current_block_height
+                logger.error(f"Cannot unstake contract ID {contract_id}. Remaining term: {remaining} blocks.")
+                return False
+
+            unstake_amount = contract['amount']
+            # Remove the contract from staking agreements
+            self.staking_agreements.remove(contract)
+            logger.info(f"Staking contract {contract_id} removed for address {address}.")
+
+        # Credit the account back using the account manager
+        if not self.account_manager.credit_account(address, unstake_amount):
+            logger.error(f"Failed to credit account {address} after unstaking.")
+            return False
+
+        with self.coin.lock:
+            self.coin.total_staked -= unstake_amount
+            logger.info(f"Updated total staked amount: {self.coin.total_staked}")
+
+        # Emit an event for unstaking if your system supports it (not shown here)
+        logger.info(f"Unstaked {unstake_amount} OMC from contract ID {contract_id} for {address}.")
+        return True
 
     def check_balance_for_staking(self, address: str, amount: Union[int, float]) -> bool:
         """

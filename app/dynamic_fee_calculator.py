@@ -4,13 +4,14 @@ from decimal import Decimal, ROUND_DOWN
 from typing import Dict, Any, List
 from collections import deque
 import json
+from datetime import datetime, timezone, date
 
 # Define a DecimalEncoder if needed for JSON serialization.
 class DecimalEncoder(json.JSONEncoder):
-    def default(self, o):
-        if isinstance(o, Decimal):
-            return str(o)
-        return super().default(o)
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return format(obj, 'f')  # Force fixed-point format
+        return super().default(obj)
 
 class DynamicFeeCalculator:
     """
@@ -18,41 +19,40 @@ class DynamicFeeCalculator:
     This implementation uses gas units as defined in a gas unit mapping and adjusts the fee based on mempool congestion.
     """
     def __init__(self,
-                 base_fee: Decimal = Decimal('0.001'),                # Base fee in OMC
-                 fee_multiplier: Decimal = Decimal('0.005'),          # Multiplier for congestion adjustments
-                 gas_price_adjustment: Decimal = Decimal('0.0001'),    # Fee per gas unit
-                 type_fee_adjustments: Dict[str, Decimal] = None,      # Optional additional fee adjustments by transaction type
-                 moving_average_window: int = 100,                     # Window size for moving average of fees
-                 max_fee: Decimal = Decimal('0.005'),                   # Maximum fee cap
-                 min_fee: Decimal = Decimal('0.0001')):                 # Minimum fee floor
+             base_fee: Decimal = Decimal('0.0000000000000001'),
+             fee_multiplier: Decimal = Decimal('0.00000000000001'),
+             gas_price_adjustment: Decimal = Decimal('0.000000000000001'),
+             type_fee_adjustments: Dict[str, Decimal] = None,
+             moving_average_window: int = 100,
+             max_fee: Decimal = Decimal('0.0000000000001'),
+             min_fee: Decimal = Decimal('0.00000000000000001')):
         self.base_fee = base_fee
         self.fee_multiplier = fee_multiplier
         self.gas_price_adjustment = gas_price_adjustment
-        self.type_fee_adjustments = type_fee_adjustments if type_fee_adjustments else {}
+        self.type_fee_adjustments = type_fee_adjustments if type_fee_adjustments else {
+            'deploy_contract': Decimal('0.00000000000001'),
+            'execute_contract': Decimal('0.000000000000005'),
+            'standard_transfer': Decimal('0.0')
+        }
         self.moving_average_window = moving_average_window
         self.max_fee = max_fee
         self.min_fee = min_fee
 
-        # Deque for maintaining a moving average of recent fees.
-        self.recent_fees = deque(maxlen=self.moving_average_window)
-        self.average_fee = base_fee
-
-        # Lock for thread-safety.
-        self.lock = threading.Lock()
-
-        # Mapping transaction types to gas units.
+        # Use much smaller gas units for standard transfers.
         self.gas_unit_mapping = {
-            'standard_transfer': Decimal('50'),
-            'deploy_contract': Decimal('200'),
-            'execute_contract': Decimal('150'),
-            'metadata_processing': Decimal('30'),
-            # Additional types can be added as needed.
+            'standard_transfer': Decimal('1'),
+            'deploy_contract': Decimal('10'),
+            'execute_contract': Decimal('8'),
+            'metadata_processing': Decimal('1'),
         }
 
         logging.info(f"DynamicFeeCalculator initialized with base_fee={self.base_fee} OMC, "
-                     f"fee_multiplier={self.fee_multiplier}, gas_price_adjustment={self.gas_price_adjustment}, "
-                     f"max_fee={self.max_fee}, min_fee={self.min_fee}.")
-
+                    f"fee_multiplier={self.fee_multiplier}, gas_price_adjustment={self.gas_price_adjustment}, "
+                    f"max_fee={self.max_fee}, min_fee={self.min_fee}.")
+        self.recent_fees = deque(maxlen=self.moving_average_window)
+        self.average_fee = base_fee
+        self.lock = threading.Lock()
+        
     def get_gas_units(self, transaction: Dict[str, Any]) -> Decimal:
         """
         Determines the gas units consumed by a transaction based on its type.
