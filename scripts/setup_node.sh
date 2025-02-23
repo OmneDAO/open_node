@@ -26,7 +26,7 @@ echo "Calculated PORT_NUMBER: ${PORT_NUMBER}"
 read -p "Enter your wallet address, which will be set as the steward address for this node: " STEWARD_ADDRESS
 
 # Validate the steward address format (basic validation, adjust as needed)
-if [[ ! "$STEWARD_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+if [[ ! "$STEWARD_ADDRESS" =~ ^0z[0-9a-fA-F]{40}$ ]]; then
     error_exit "Invalid steward address format. It should start with '0x' followed by 40 hexadecimal characters."
 fi
 

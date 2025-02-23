@@ -79,7 +79,7 @@ cd open_node
 Ensure that the `setup_node.sh` script has the necessary execution permissions.
 
 ```sh
-chmod +x setup_node.sh
+chmod +x scripts/setup_node.sh
 ```
 
 ### 3. Configure the Node
@@ -91,7 +91,7 @@ Run the setup script to configure your node. This script will:
 - Update configuration files with your steward address and environment settings.
 
 ```sh
-./setup_node.sh
+./scripts/setup_node.sh
 ```
 
 **During the setup, you will be prompted to:**
