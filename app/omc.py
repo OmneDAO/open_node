@@ -12,7 +12,7 @@ import queue  # Import queue for handling transfer requests
 # Import AccountManager from account_manager.py
 from account_manager import AccountManager
 
-from staking import StakingMngr, StakedOMC
+# from staking import StakingMngr, StakedOMC
 
 # Set decimal precision higher to handle financial calculations accurately
 getcontext().prec = 28
@@ -56,7 +56,7 @@ class OMC:
         self.name = 'Omne Coin'
         self.symbol = 'OMC'
         self.decimals = 18
-        self.image = "https://bafkreidygcfusnh6kilszq7be3j33f4t4hzxcimkgpmhkrxw4v23endhbu.ipfs.w3s.link/"
+        self.image = "https://w3s.link/ipfs/bafybeih4yyumkffmdze4rb3hy3yfz66hbv5jxb76czr25xvpjufvbwd22a"
         # Scale the values:
         self.coin_max = coin_max * (10 ** self.decimals)
         self.initial_supply = Decimal(initial_supply) * (10 ** self.decimals)
@@ -85,6 +85,13 @@ class OMC:
 
         if minting_rules:
             self._process_minting_rules(minting_rules)
+            
+    def set_staking_manager(self, staking_manager_instance):
+        """
+        Sets the staking manager instance. This method should be called after the staking module is imported.
+        """
+        self.staking_manager = staking_manager_instance
+        self.logger.info("StakingManager has been set in OMC.")
 
     # ----------------------------
     # Minting Rules Processing
