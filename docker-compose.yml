@@ -1,12 +1,14 @@
+version: "3.8"
+
 services:
   node.omne.open:
     build: 
       context: .
-      dockerfile: Dockerfile.open_node  # Using Dockerfile.open_node for open-source node
+      dockerfile: Dockerfile.open_node
     image: omne-node:open-source
     container_name: node.omne.open
     ports:
-      - "${OPEN_HOST_PORT:-3401}:3400"  # Default to 3401 if OPEN_HOST_PORT not set
+      - "${OPEN_HOST_PORT:-3401}:3400"  # Maps host port (defaults to 3401 if OPEN_HOST_PORT is not set) to container port 3400
     networks:
       - omne_node_eaies-net
       - omne_node_hash-api-net
@@ -22,15 +24,16 @@ services:
       - PYTHONPATH=/app
       - NODE_ENV=${NODE_ENV:-development}
       - PORT_NUMBER=${PORT_NUMBER:-3400}
-      - NODE_ID=${NODE_ID:-node1}  # Add NODE_ID environment variable
+      - NODE_ID=${NODE_ID:-node1}
+      - STEWARD_ADDRESS=${STEWARD_ADDRESS}
     deploy:
       resources:
         limits:
-          cpus: '2.0'
-          memory: '4G'
+          cpus: "2.0"
+          memory: "4G"
         reservations:
-          cpus: '1.0'
-          memory: '2G'
+          cpus: "1.0"
+          memory: "2G"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3400/api/health"]
       interval: 30s

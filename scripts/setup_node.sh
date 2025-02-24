@@ -83,10 +83,8 @@ sed -i.bak "s/node\.omne/node.omne/g" "$DOCKER_COMPOSE_FILE" || true
 sed -i.bak "s/container_name: node\.omne/container_name: node.omne/g" "$DOCKER_COMPOSE_FILE" || true
 
 # Update the port mapping.
-# This regex looks for a line that starts with a dash followed by optional whitespace, 
-# then the current host port (assumed to be 3400 by default) and :3400.
-# It replaces it with our calculated ${HOST_PORT}:3400.
-sed -i.bak -E "s/^([[:space:]]*-[[:space:]]*)3400:3400/\1${HOST_PORT}:3400/" "$DOCKER_COMPOSE_FILE" || true
+# The regex below matches lines with an optional leading quote around "3400:3400" and replaces them with our calculated HOST_PORT.
+sed -i.bak -E "s/^([[:space:]]*-[[:space:]]*)\"?3400:3400\"?/\1\"${HOST_PORT}:3400\"/" "$DOCKER_COMPOSE_FILE" || true
 
 # Update environment variables in docker-compose.yml using newline-escaped syntax
 if grep -q 'STEWARD_ADDRESS=' "$DOCKER_COMPOSE_FILE"; then
