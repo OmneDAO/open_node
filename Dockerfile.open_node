@@ -5,7 +5,7 @@ FROM python:3.10-slim
 
 LABEL maintainer="OmneDAO Foundation <leadership@omne.foundation>"
 
-# Install necessary system packages and dependencies, including git and ca-certificates
+# Install necessary system packages and dependencies
 RUN apt-get update -y && \
     apt-get install -y \
         build-essential \
@@ -21,8 +21,7 @@ RUN apt-get update -y && \
         ninja-build \
         libkrb5-dev \
         ca-certificates \
-        unzip \
-    && \
+        unzip && \
     # Install Node.js 18.x
     curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
     apt-get install -y nodejs && \
@@ -41,29 +40,13 @@ RUN pip install --upgrade pip
 # Prevent git from prompting for credentials
 ENV GIT_TERMINAL_PROMPT=0
 
-# Install Python dependencies from the requirements.txt file
-COPY requirements.txt /app/requirements.txt
-RUN pip3 install --no-cache-dir -r /app/requirements.txt
-
-# Set environment variables for Python and Node.js
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app \
-    NODE_ENV=development
-
-# Set the working directory
+# Copy the open source requirements file and install Python dependencies
+COPY requirements_open.txt /app/requirements.txt
 WORKDIR /app
-
-# Copy the requirements.txt first for better caching
-COPY requirements.txt /app/requirements.txt
-
-# Install Python dependencies
-RUN pip3 install --no-cache-dir -r /app/requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Copy the project code
 COPY ./app /app
-
-# Exclude sensitive modules by using a separate directory or selective copy
-# For simplicity, assuming main_open.py is present and required modules are omitted from requirements.txt
 
 # Expose the port the app will run on
 EXPOSE 3400
@@ -77,4 +60,4 @@ USER omneuser
 
 # Define the entry point for the container
 ENTRYPOINT ["python3"]
-CMD ["main.py"]  # Ensure that main.py is in /app
+CMD ["main.py"]
