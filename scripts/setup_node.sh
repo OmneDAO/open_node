@@ -1,12 +1,11 @@
 #!/bin/bash
-
 # File: scripts/setup_node.sh
 # Purpose: Configure the Omne node with a steward address, environment, and unique settings.
 
-# Exit immediately if a command exits with a non-zero status
+# Exit immediately if any command fails
 set -e
 
-# Function to display error messages
+# Function to display error messages and exit
 function error_exit {
     echo "[Error] $1" >&2
     exit 1
@@ -25,9 +24,9 @@ echo "Calculated PORT_NUMBER: ${PORT_NUMBER}"
 # Prompt the user for their steward (wallet) address
 read -p "Enter your wallet address, which will be set as the steward address for this node: " STEWARD_ADDRESS
 
-# Validate the steward address format (basic validation, adjust as needed)
+# Validate the steward address format (for our blockchain it starts with "0z")
 if [[ ! "$STEWARD_ADDRESS" =~ ^0z[0-9a-fA-F]{40}$ ]]; then
-    error_exit "Invalid steward address format. It should start with '0x' followed by 40 hexadecimal characters."
+    error_exit "Invalid steward address format. It should start with '0z' followed by 40 hexadecimal characters."
 fi
 
 # Prompt the user to select the deployment environment
@@ -60,10 +59,10 @@ esac
 
 echo "Selected Environment: ${NODE_ENV}"
 
-# Set HOST_PORT equal to PORT_NUMBER for simplicity; adjust if needed
+# Set HOST_PORT equal to PORT_NUMBER for simplicity (adjust if needed)
 HOST_PORT=${PORT_NUMBER}
 
-# Export environment variables for use in this script
+# Export environment variables for this script
 export NODE_ENV
 export NETWORK_SUFFIX
 export HOST_PORT
@@ -82,33 +81,40 @@ cp "$DOCKER_COMPOSE_FILE" "${DOCKER_COMPOSE_FILE}.bak"
 # Update service name and network names based on the environment
 sed -i.bak "s/node\.omne/node.omne/g" "$DOCKER_COMPOSE_FILE" || true
 sed -i.bak "s/container_name: node\.omne/container_name: node.omne/g" "$DOCKER_COMPOSE_FILE" || true
-sed -i.bak "s/[0-9]*:3400/${HOST_PORT}:3400/g" "$DOCKER_COMPOSE_FILE" || true
 
-# Update the environment variables in docker-compose.yml
+# Update the port mapping.
+# This regex looks for a line that starts with a dash followed by optional whitespace, 
+# then the current host port (assumed to be 3400 by default) and :3400.
+# It replaces it with our calculated ${HOST_PORT}:3400.
+sed -i.bak -E "s/^([[:space:]]*-[[:space:]]*)3400:3400/\1${HOST_PORT}:3400/" "$DOCKER_COMPOSE_FILE" || true
+
+# Update environment variables in docker-compose.yml using newline-escaped syntax
 if grep -q 'STEWARD_ADDRESS=' "$DOCKER_COMPOSE_FILE"; then
     sed -i.bak "s|STEWARD_ADDRESS=.*|STEWARD_ADDRESS=${STEWARD_ADDRESS}|g" "$DOCKER_COMPOSE_FILE"
 else
-    # If STEWARD_ADDRESS is not present, add it under environment
-    sed -i.bak "/environment:/a \ \ \ \ - STEWARD_ADDRESS=${STEWARD_ADDRESS}" "$DOCKER_COMPOSE_FILE"
+    sed -i.bak '/environment:/a\
+    - STEWARD_ADDRESS='"${STEWARD_ADDRESS}" "$DOCKER_COMPOSE_FILE"
 fi
 
-# Update NODE_ENV and NETWORK_SUFFIX in docker-compose.yml
 if grep -q 'NODE_ENV=' "$DOCKER_COMPOSE_FILE"; then
     sed -i.bak "s|NODE_ENV=.*|NODE_ENV=${NODE_ENV}|g" "$DOCKER_COMPOSE_FILE"
 else
-    sed -i.bak "/environment:/a \ \ \ \ - NODE_ENV=${NODE_ENV}" "$DOCKER_COMPOSE_FILE"
+    sed -i.bak '/environment:/a\
+    - NODE_ENV='"${NODE_ENV}" "$DOCKER_COMPOSE_FILE"
 fi
 
 if grep -q 'NETWORK_SUFFIX=' "$DOCKER_COMPOSE_FILE"; then
     sed -i.bak "s|NETWORK_SUFFIX=.*|NETWORK_SUFFIX=${NETWORK_SUFFIX}|g" "$DOCKER_COMPOSE_FILE"
 else
-    sed -i.bak "/environment:/a \ \ \ \ - NETWORK_SUFFIX=${NETWORK_SUFFIX}" "$DOCKER_COMPOSE_FILE"
+    sed -i.bak '/environment:/a\
+    - NETWORK_SUFFIX='"${NETWORK_SUFFIX}" "$DOCKER_COMPOSE_FILE"
 fi
 
 if grep -q 'NODE_ID=' "$DOCKER_COMPOSE_FILE"; then
     sed -i.bak "s|NODE_ID=.*|NODE_ID=${NODE_ID}|g" "$DOCKER_COMPOSE_FILE"
 else
-    sed -i.bak "/environment:/a \ \ \ \ - NODE_ID=${NODE_ID}" "$DOCKER_COMPOSE_FILE"
+    sed -i.bak '/environment:/a\
+    - NODE_ID='"${NODE_ID}" "$DOCKER_COMPOSE_FILE"
 fi
 
 echo "Updated docker-compose.yml with NODE_ENV, NETWORK_SUFFIX, STEWARD_ADDRESS, PORT_NUMBER, and NODE_ID."
@@ -123,23 +129,16 @@ else
     cp "$MAIN_PY_FILE" "${MAIN_PY_FILE}.bak"
 
     # Update steward address
-    # Assuming there's a line like: self.node.steward = "current_steward_address"
     sed -i.bak "s/self\.node\.steward = \".*\"/self.node.steward = \"${STEWARD_ADDRESS}\"/g" "$MAIN_PY_FILE" || true
 
     # Update node URL based on environment
-    # Assuming there's a function or variable that sets the node URL
-    # Modify accordingly based on your actual main.py structure
-
-    # Example: Setting a variable `current_node_url`
     sed -i.bak "s|current_node_url = .*|current_node_url = \"http://${NODE_ID}.omne:${PORT_NUMBER}\"|g" "$MAIN_PY_FILE" || true
 
     echo "Updated app/main.py with steward address and node URL."
 fi
 
-# Inform the user to proceed with Docker setup
 echo "Setup complete. You can now run 'docker-compose up -d' to start your node."
 
-# Optionally, offer to start Docker Compose automatically
 read -p "Do you want to start the node now? (y/n): " START_NOW
 if [[ "$START_NOW" == "y" || "$START_NOW" == "Y" ]]; then
     docker-compose up -d
