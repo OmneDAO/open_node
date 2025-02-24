@@ -22,4 +22,4 @@ qiskit-aer==0.15.0
 requests
 rsa
 python-ecvrf-4o==0.1.1
-charm-crypto
+mypy
