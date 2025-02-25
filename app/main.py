@@ -228,6 +228,7 @@ def main():
 
     # Set up the staking manager (if used) from the ledger.
     staking_manager = ledger.staking_manager
+    omc.set_staking_manager(staking_manager)
 
     # Initialize VRFUtils with the validator's VRF private key.
     vrf_utils = VRFUtils(private_key_pem=VALIDATOR_VRF_PRIVATE_KEY)

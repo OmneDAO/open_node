@@ -9,12 +9,15 @@ from class_integrity_verifier import ClassIntegrityVerifier
 from dynamic_fee_calculator import DynamicFeeCalculator
 from omc import OMC, TransferRequest, DoubleSpendingError
 from account_manager import AccountManager
-from staking import StakingMngr, StakedOMC
+from staking import StakingMngr
+from staked_omc import StakedOMC
 from permissions import PermissionManager
 from consensus_engine import ConsensusEngine
 from crypto_utils import DecimalEncoder
 import logging
 import os
+import hashlib
+from block import Block
 import threading
 import time
 from functools import wraps
@@ -384,28 +387,83 @@ class NetworkManager:
             except requests.exceptions.RequestException as e:
                 logger.error(f"Failed to broadcast VRF output to peer {peer}: {e}")
                 
-    def broadcast_new_account(self, address: str, balance: Decimal, exclude_peer_url: Optional[str] = None):
+    def broadcast_new_account(self, address: str, balance: Decimal, 
+                          exclude_peer_url: Optional[str] = None, 
+                          public_key: Optional[str] = None, 
+                          signature: Optional[str] = None,
+                          timestamp: Optional[str] = None,
+                          tx_hash: Optional[str] = None):
         """
-        Broadcasts a new account to all known peers.
-        
+        Creates and broadcasts a new account creation transaction.
+        The transaction is added to the local mempool for inclusion on the blockchain,
+        and then propagated to all known peers (except an optional excluded peer).
+
         :param address: The address of the new account.
         :param balance: The initial balance of the new account.
-        :param exclude_peer_url: The peer URL to exclude from broadcasting (e.g., sender).
+        :param exclude_peer_url: Optional URL of a peer to exclude from broadcasting.
+        :param public_key: Optional public key for the new account.
+        :param signature: Optional signature if the transaction is pre-signed.
+        :param timestamp: Optional timestamp for the transaction (ISO format).
+        :param tx_hash: Optional precomputed hash of the transaction.
         """
+
+        # Build the complete account creation transaction.
+        transaction = {
+            'address': address,
+            'balance': str(balance),  # Convert Decimal to string to maintain fixed-point format
+            'type': 'account_creation',  # Custom transaction type for creating accounts
+            'timestamp': timestamp if timestamp is not None else str(datetime.now(timezone.utc)),
+            'withdrawals': 0,
+            'fee': "0",  # Account creation might be fee-free
+            'sender': address,  # Self-created account
+            'public_key': public_key,
+            'signature': signature,  # May be provided externally or set later
+            'hash': tx_hash         # May be provided externally or computed below
+        }
+
+        # If no hash is provided, compute a canonical payload (excluding signature and hash) and hash it.
+        try:
+            if not transaction['hash']:
+                payload = json.dumps(
+                    {k: transaction[k] for k in sorted(transaction) if k not in ['signature', 'hash']},
+                    sort_keys=True,
+                    cls=DecimalEncoder
+                )
+                transaction['hash'] = hashlib.sha256(payload.encode('utf-8')).hexdigest()
+            # If no signature is provided, you could also sign the payload here if needed.
+        except Exception as e:
+            logger.error(f"Failed to process account creation transaction: {e}")
+            return
+
+        # Add the transaction to the mempool.
+        if self.mempool.add_transaction(transaction):
+            logger.info(f"Account creation transaction for {address} added to mempool.")
+        else:
+            logger.warning(f"Failed to add account creation transaction for {address} to mempool.")
+
+        # Prepare a propagation payload.
+        # You can choose to send the entire transaction or just selected fields.
+        propagation_payload = {
+            'address': address,
+            'balance': str(balance),
+            'public_key': public_key,
+            'signature': signature,
+            'timestamp': transaction['timestamp'],
+            'hash': transaction['hash'],
+            'type': transaction['type']
+        }
+
+        # Get a copy of the current peers.
         with self.lock:
             current_peers = list(self.peers)
 
-        payload = {
-            'address': address,
-            'balance': str(balance)
-        }
-
+        # Broadcast the transaction payload to each peer, excluding the specified peer if needed.
         for peer in current_peers:
             if exclude_peer_url and peer == exclude_peer_url:
                 continue
             url = f"{peer}/api/propagate_account"
             try:
-                response = requests.post(url, json=payload, timeout=5)
+                response = requests.post(url, json=propagation_payload, timeout=5)
                 if response.status_code in [200, 201]:
                     logger.info(f"Successfully propagated account to {peer}.")
                 else:
@@ -747,7 +805,7 @@ class NetworkManager:
         def propagate_account():
             """
             Propagates a new account to the network.
-            Expects JSON: { "address": "0xUserAddress123", "balance": "1000.0" }
+            Expects JSON: { "address": "0zUserAddress123", "balance": "1000.0" }
             """
             data = request.json
             address = data.get('address')
@@ -814,8 +872,7 @@ class NetworkManager:
             except Exception as e:
                 logger.exception("Exception occurred while retrieving accounts.")
                 return jsonify({"message": "Error retrieving accounts", "error": str(e)}), 500
-            
-        # 7.1. /omc_balance [POST]
+        
         @accounts_bp.route('/api/omc_balance', methods=['POST'])
         def get_omc_balance():
             """
@@ -847,7 +904,6 @@ class NetworkManager:
                 logger.exception("Error in get_omc_balance endpoint.")
                 return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
-        # 7.2. /somc_balance [POST]
         @accounts_bp.route('/api/somc_balance', methods=['POST'])
         def get_somc_balance():
             """
@@ -879,7 +935,6 @@ class NetworkManager:
                 logger.exception("Error in get_somc_balance endpoint.")
                 return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
-        # 7.3. /check_activity [POST]
         @accounts_bp.route('/api/check_activity', methods=['POST'])
         def check_activity():
             """
@@ -953,7 +1008,6 @@ class NetworkManager:
                 logger.exception("Error in check_activity endpoint.")
                 return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
-        # 7.4. /get_coin_economy [GET]
         @accounts_bp.route('/api/get_coin_economy', methods=['GET'])
         def get_coin_economy():
             """
@@ -980,7 +1034,28 @@ class NetworkManager:
             except Exception as e:
                 logger.exception("Error in get_coin_economy endpoint.")
                 return jsonify({"error": "Internal server error", "details": str(e)}), 500
-            
+        
+        @accounts_bp.route('/api/get_last_nonce', methods=['GET'])
+        def get_last_nonce():
+            """
+            Retrieves the last confirmed nonce for the given wallet address.
+            Expects a query parameter 'address'.
+            Returns JSON: { "nonce": <number> }
+            """
+            address = request.args.get('address')
+            if not address:
+                return jsonify({"error": "Address not provided"}), 400
+
+            # Retrieve the nonce from the account manager.
+            nonce = 0
+            try:
+                nonce = self.ledger.account_manager.get_last_nonce(address)
+            except Exception as e:
+                logger.error(f"Error fetching nonce for {address}: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+            return jsonify({"nonce": nonce}), 200
+        
         # 8. Transfer Management Endpoints
         transfer_bp = Blueprint('transfer_bp', __name__)
         

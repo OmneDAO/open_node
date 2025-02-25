@@ -10,7 +10,6 @@ import threading
 
 from omc import OMC
 from account_manager import AccountManager
-from staked_omc import StakedOMC
 
 if TYPE_CHECKING:
     from omc import OMC
@@ -22,56 +21,6 @@ formatter = logging.Formatter('[%(asctime)s] [%(levelname)s] [%(name)s] %(messag
 handler.setFormatter(formatter)
 if not logger.handlers:
     logger.addHandler(handler)
-
-
-class StakedOMC:
-    def __init__(self, name='Staked OMC', symbol='sOMC', decimals=18):
-        self.accounts = []
-        self.name = name
-        self.id = None
-        self.symbol = symbol
-        self.decimals = decimals
-        self.id = "0z48d76b0690dcdcb32f1893d75c99681f2b595b36"
-        self.image = "https://bafybeihbanfylphrqzpzgaibz6pwwl7wyq7kp2n2yt2bq4irrrwirwgcga.ipfs.w3s.link/sOMC-3.png"
-        self.balance = {}
-        self.burn_address = "0z0000000000000000000000000000000000000000"
-        self.staked_omc_distributed = 0.0
-        self.treasury_address = None
-
-        # Initialize a lock for thread-safe operations on balance and accounts
-        self.lock = threading.Lock()
-
-    def mint(self, recipient: str, amount: float):
-        """
-        Mint staked coins and send them to the specified recipient.
-        """
-        logger.info(f"Minting staked coins: recipient={recipient}, amount={amount}")
-        if amount <= 0:
-            raise ValueError("Amount must be a positive value")
-
-        # Convert the staked amount to a value with the correct number of decimal places
-        amount_with_decimals = amount * (10 ** self.decimals)
-        logger.info(f"Amount with decimals: {amount_with_decimals}")
-
-        with self.lock:
-            if recipient not in self.balance:
-                self.balance[recipient] = 0
-
-            self.balance[recipient] += amount_with_decimals
-            self.staked_omc_distributed += amount_with_decimals
-
-            # Check if the recipient already has an account in the accounts list
-            account = next((acc for acc in self.accounts if acc['address'] == recipient), None)
-            if account:
-                # Update the existing account balance
-                account['balance'] += amount_with_decimals
-            else:
-                # Create a new account object and add it to the accounts list
-                new_account = {'address': recipient, 'balance': amount_with_decimals}
-                self.accounts.append(new_account)
-
-        logger.info(f"Minted {amount_with_decimals} staked coins to {recipient}. Total distributed: {self.staked_omc_distributed}")
-
 
 class StakingMngr:
     def __init__(self, coin: OMC, account_manager: AccountManager, staked_omc: StakedOMC):
