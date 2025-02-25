@@ -206,16 +206,23 @@ class Mempool:
     def _get_last_mempool_nonce(self, sender: str) -> int:
         """
         Retrieves the last nonce for a sender within the mempool.
-
-        :param sender: Sender's address.
-        :return: Last nonce used by the sender in the mempool, or the last confirmed nonce if none.
+        If the sender is involved in a staking contract, checks the last staking transaction nonce.
         """
         mempool_transactions = [tx for tx in self.transactions if tx['sender'] == sender]
-        if mempool_transactions:
-            return max(tx['nonce'] for tx in mempool_transactions)
-        else:
-            return self.ledger.account_manager.get_last_nonce(sender)
 
+        # Find the last confirmed nonce from the ledger
+        last_confirmed_nonce = self.ledger.account_manager.get_last_nonce(sender)
+
+        # If there are staking transactions, check their last nonce
+        staking_transactions = [tx for tx in mempool_transactions if tx.get('type') == 'staking']
+        
+        if staking_transactions:
+            # Find highest nonce in staking transactions
+            return max(tx['nonce'] for tx in staking_transactions)
+
+        # Otherwise, return the highest nonce in normal transactions
+        return max([tx['nonce'] for tx in mempool_transactions], default=last_confirmed_nonce)
+    
     def remove_transaction(self, tx_hash: str) -> bool:
         """
         Removes a transaction from the mempool based on its hash.

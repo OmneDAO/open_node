@@ -49,7 +49,8 @@ class AccountManager:
 
     def __init__(self):
         # Store balances: address -> balance
-        self.balances: Dict[str, Decimal] = {}
+        self.balances: Dict[str, Dict[str, Decimal]] = {}
+        self.accounts: Dict[str, Dict[str, any]] = {}
         self.balances_lock = RLock()
 
         # Store staking contracts: contract_id -> {'address': str, 'amount': Decimal, 'min_term': int, 'start_block': int}
@@ -81,23 +82,13 @@ class AccountManager:
             # Return a shallow copy to avoid external modifications
             return dict(self.balances)
         
-    def add_account(self, address: str, initial_balance: Decimal) -> bool:
-        """
-        Adds a new account with the specified address and initial balance.
-        
-        :param address: The address of the new account.
-        :param initial_balance: The initial balance to assign.
-        :return: True if account was added successfully, False if account already exists.
-        """
-        with self.balances_lock:
-            if address in self.balances:
-                logging.info(f"[AccountManager] Account {address} already exists.")
-                return False
-            self.balances[address] = initial_balance
-            logging.info(f"[AccountManager] New account added: {address} with balance {initial_balance} OMC.")
-        
-        # Emit balance update event
-        self.on_balance_updated.emit(address=address, previous_balance=None, new_balance=initial_balance)
+    def add_account(self, address: str, initial_omc: Decimal) -> bool:
+        if address in self.accounts:
+            logger.info(f"Account {address} already exists.")
+            return False
+        # Initialize with OMC, sOMC balances and a nonce of 0.
+        self.accounts[address] = {"OMC": initial_omc, "sOMC": Decimal('0'), "nonce": 0}
+        logger.info(f"New account added: {address} with OMC balance {initial_omc}, sOMC 0, and nonce 0.")
         return True
 
     # ----------------------------
@@ -138,68 +129,41 @@ class AccountManager:
     # ----------------------------
     # Balance Management
     # ----------------------------
-    def get_account_balance(self, address: str) -> Optional[Decimal]:
-        """
-        Retrieves the balance of a given account.
+    def get_account_balance(self, address: str, token: str = "OMC") -> Optional[Decimal]:
+        if address not in self.accounts:
+            return None
+        return self.accounts[address].get(token, Decimal('0'))
 
-        :param address: The address of the account.
-        :return: Balance as Decimal or None if account does not exist.
-        """
-        with self.balances_lock:
-            balance = self.balances.get(address)
-            if balance is not None:
-                logger.debug(f"[AccountManager] Retrieved balance for {address}: {balance} OMC.")
-            else:
-                logger.debug(f"[AccountManager] Balance for {address} not found.")
-            return balance
-
-    def credit_account(self, address: str, amount: Decimal) -> bool:
-        """
-        Credits an amount to an account.
-
-        :param address: The address of the account.
-        :param amount: Amount to credit.
-        :return: True if successful, False otherwise.
-        """
-        if amount < Decimal('0'):
-            logging.error(f"[AccountManager] Cannot credit negative amount: {amount} OMC to {address}.")
+    def credit_account(self, address: str, amount: Decimal, token: str = "OMC") -> bool:
+        if address not in self.accounts:
+            logger.error(f"Account {address} does not exist.")
             return False
-
-        with self.balances_lock:
-            previous_balance = self.balances.get(address, Decimal('0'))
-            new_balance = previous_balance + amount
-            self.balances[address] = new_balance
-            logging.debug(f"[AccountManager] Credited {amount} OMC to {address}. New balance: {new_balance} OMC.")
-
-        # Emit balance update event
-        self.on_balance_updated.emit(address=address, previous_balance=previous_balance, new_balance=new_balance)
+        self.accounts[address][token] += amount
+        logger.debug(f"Credited {amount} {token} to {address}. New {token} balance: {self.accounts[address][token]}")
         return True
 
-    def debit_account(self, address: str, amount: Decimal) -> bool:
-        """
-        Debits an amount from an account if sufficient balance exists.
-
-        :param address: The address of the account.
-        :param amount: Amount to debit.
-        :return: True if successful, False otherwise.
-        """
-        if amount < Decimal('0'):
-            logging.error(f"[AccountManager] Cannot debit negative amount: {amount} OMC from {address}.")
+    def debit_account(self, address: str, amount: Decimal, token: str = "OMC") -> bool:
+        if address not in self.accounts:
+            logger.error(f"Account {address} does not exist.")
             return False
-
-        with self.balances_lock:
-            current_balance = self.balances.get(address, Decimal('0'))
-            if current_balance >= amount:
-                new_balance = current_balance - amount
-                self.balances[address] = new_balance
-                logging.debug(f"[AccountManager] Debited {amount} OMC from {address}. New balance: {new_balance} OMC.")
-            else:
-                logging.error(f"[AccountManager] Insufficient balance for {address}. Attempted to debit {amount} OMC, but current balance is {current_balance} OMC.")
-                return False
-
-        # Emit balance update event
-        self.on_balance_updated.emit(address=address, previous_balance=current_balance, new_balance=new_balance)
+        if self.accounts[address][token] < amount:
+            logger.error(f"Insufficient {token} balance for {address}.")
+            return False
+        self.accounts[address][token] -= amount
+        # For outgoing transactions, increment the nonce.
+        self.accounts[address]["nonce"] += 1
+        logger.debug(f"Debited {amount} {token} from {address}. New {token} balance: {self.accounts[address][token]}. Nonce updated to {self.accounts[address]['nonce']}.")
         return True
+    
+    def get_last_nonce(self, address: str) -> int:
+        """
+        Returns the last confirmed nonce for the given address.
+        If the account doesn't exist, assume nonce 0.
+        """
+        account = self.accounts.get(address)
+        if account and 'nonce' in account:
+            return account['nonce']
+        return 0
 
     # ----------------------------
     # Staking Contract Management
