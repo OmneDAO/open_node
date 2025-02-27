@@ -10,7 +10,7 @@ import heapq
 import time
 from dateutil import parser  # Ensure dateutil is installed
 
-from crypto_utils import CryptoUtils
+from crypto_utils import CryptoUtils, DecimalEncoder
 from dynamic_fee_calculator import DynamicFeeCalculator
 from consensus_engine import ConsensusEngine  # For consensus-specific validations
 
@@ -94,19 +94,23 @@ class Mempool:
         self.logger.info("[Mempool] Ledger has been set.")
 
     def compute_tx_hash(self, transaction: Dict) -> str:
-        """
-        Computes a SHA-256 hash of the transaction data.
-        """
-        tx_data = {
-            'sender': transaction['sender'],
-            'receiver': transaction['receiver'],
-            'amount': str(transaction['amount']),
-            'fee': str(transaction.get('fee', '0')),
-            'nonce': transaction['nonce'],
-            'extra_data': transaction.get('extra_data', '')  # For consensus-specific data
-        }
+        # Define the standard keys that should always be included
+        keys_to_include = ['sender', 'fee', 'nonce', 'extra_data']
+        
+        # Include 'receiver' if it exists.
+        if 'receiver' in transaction:
+            keys_to_include.append('receiver')
+        
+        # For the transaction amount, check for either 'amount' or 'balance'
+        if 'amount' in transaction:
+            keys_to_include.append('amount')
+        elif 'balance' in transaction:
+            keys_to_include.append('balance')
+        
+        # Build the transaction data dictionary using only the keys that are present.
+        tx_data = { key: str(transaction[key]) for key in keys_to_include if key in transaction }
         tx_string = json.dumps(tx_data, sort_keys=True)
-        tx_hash = hashlib.sha256(tx_string.encode()).hexdigest()
+        tx_hash = hashlib.sha256(tx_string.encode('utf-8')).hexdigest()
         return tx_hash
 
     def add_transaction(self, transaction: Dict) -> bool:
@@ -117,13 +121,20 @@ class Mempool:
         :return: True if transaction is added successfully, False otherwise.
         """
         sender = transaction.get('sender')
-        receiver = transaction.get('receiver')
         amount = transaction.get('amount')
         fee = transaction.get('fee', '0')
         nonce = transaction.get('nonce')
         signature = transaction.get('signature')
+        tx_type = transaction.get('type', '')
 
-        if not all([sender, receiver, amount, nonce, signature]):
+        # For "account_creation" transactions, the 'receiver' field is not required.
+        if tx_type == 'account_creation':
+            required_fields = [sender, amount, nonce, signature]
+        else:
+            receiver = transaction.get('receiver')
+            required_fields = [sender, receiver, amount, nonce, signature]
+
+        if not all(required_fields):
             self.logger.error("[Mempool] Transaction is missing required fields.")
             return False
 
@@ -141,8 +152,15 @@ class Mempool:
         transaction['timestamp'] = time.time()
         transaction['confirmations'] = 0
 
-        # Verify signature using CryptoUtils
-        if not self.crypto_utils.verify_signature(transaction):
+        # Build the canonical payload for signature verification.
+        payload = json.dumps(
+            {k: transaction[k] for k in sorted(transaction) if k not in ['signature', 'hash']},
+            sort_keys=True,
+            cls=DecimalEncoder
+        )
+
+        # Verify the signature by passing payload, signature, and public key.
+        if not self.crypto_utils.verify_signature(payload, transaction.get('signature'), transaction.get('public_key')):
             self.logger.warning(f"[Mempool] Transaction {tx_hash} from {sender} rejected due to invalid signature.")
             return False
 
@@ -161,7 +179,7 @@ class Mempool:
             # Get the sender's last nonce in mempool
             last_mempool_nonce = self._get_last_mempool_nonce(sender)
 
-            # Expected nonce is last_mempool_nonce +1
+            # Expected nonce is last_mempool_nonce + 1
             expected_nonce = last_mempool_nonce + 1
             if nonce != expected_nonce:
                 self.logger.warning(
@@ -170,22 +188,20 @@ class Mempool:
                 return False
 
             # Verify sender balance against the ledger's current state
-            balance = self.ledger.account_manager.get_account_balance(sender)
-            if balance < (amount + fee):
+            balance_on_ledger = self.ledger.account_manager.get_account_balance(sender)
+            if balance_on_ledger < (amount + fee):
                 self.logger.warning(
                     f"[Mempool] Transaction {tx_hash} from {sender} rejected due to insufficient balance. "
-                    f"Balance: {balance}, Required: {amount + fee}."
+                    f"Balance: {balance_on_ledger}, Required: {amount + fee}."
                 )
                 return False
 
             # Check if mempool is full
             if len(self.transactions) >= self.max_size:
-                # Optionally, prioritize transactions by fee and remove the lowest fee transaction
                 if self.fee_heap:
                     lowest_fee_tx = self.fee_heap[0][2]
                     lowest_fee = self.fee_heap[0][0]
                     if fee > (-lowest_fee):
-                        # Remove the lowest fee transaction
                         _, _, tx_to_remove = heapq.heappop(self.fee_heap)
                         self.transactions.remove(tx_to_remove)
                         self.logger.info(f"[Mempool] Removed transaction {tx_to_remove['hash']} to make space for higher fee transaction.")
@@ -196,13 +212,13 @@ class Mempool:
                     self.logger.warning(f"[Mempool] Mempool full. Transaction {tx_hash} rejected.")
                     return False
 
-            # All checks passed, add transaction
+            # All checks passed, add transaction to mempool.
             self.transactions.append(transaction)
             heapq.heappush(self.fee_heap, (-fee, transaction['timestamp'], transaction))
             self.current_interval_count += 1
             self.logger.info(f"[Mempool] Transaction {tx_hash} from {sender} added to mempool with fee {fee}.")
             return True
-
+                
     def _get_last_mempool_nonce(self, sender: str) -> int:
         """
         Retrieves the last nonce for a sender within the mempool.
@@ -222,7 +238,7 @@ class Mempool:
 
         # Otherwise, return the highest nonce in normal transactions
         return max([tx['nonce'] for tx in mempool_transactions], default=last_confirmed_nonce)
-    
+
     def remove_transaction(self, tx_hash: str) -> bool:
         """
         Removes a transaction from the mempool based on its hash.
