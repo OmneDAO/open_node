@@ -410,16 +410,20 @@ class NetworkManager:
         # Build the complete account creation transaction.
         transaction = {
             'address': address,
-            'balance': str(balance),  # Convert Decimal to string to maintain fixed-point format
+            'balance': str(balance),  # Convert Decimal to string to maintain fixed‑point format
             'type': 'account_creation',  # Custom transaction type for creating accounts
             'timestamp': timestamp if timestamp is not None else str(datetime.now(timezone.utc)),
             'withdrawals': 0,
-            'fee': "0",  # Account creation might be fee-free
-            'sender': address,  # Self-created account
+            'fee': "0",  # Account creation might be fee‑free
+            'sender': address,
             'public_key': public_key,
             'signature': signature,  # May be provided externally or set later
             'hash': tx_hash         # May be provided externally or computed below
         }
+
+        # Add a nonce. For a new account, the last confirmed nonce should be 0, so we set nonce to 1.
+        last_nonce = self.ledger.account_manager.get_last_nonce(address)
+        transaction['nonce'] = last_nonce + 1
 
         # If no hash is provided, compute a canonical payload (excluding signature and hash) and hash it.
         try:
@@ -430,7 +434,6 @@ class NetworkManager:
                     cls=DecimalEncoder
                 )
                 transaction['hash'] = hashlib.sha256(payload.encode('utf-8')).hexdigest()
-            # If no signature is provided, you could also sign the payload here if needed.
         except Exception as e:
             logger.error(f"Failed to process account creation transaction: {e}")
             return
@@ -442,12 +445,14 @@ class NetworkManager:
             logger.warning(f"Failed to add account creation transaction for {address} to mempool.")
 
         # Prepare a propagation payload.
-        # You can choose to send the entire transaction or just selected fields.
         propagation_payload = {
             'address': address,
             'balance': str(balance),
             'public_key': public_key,
             'signature': signature,
+            'nonce': transaction['nonce'],
+            'fee': transaction['fee'],
+            'sender': transaction['sender'],
             'timestamp': transaction['timestamp'],
             'hash': transaction['hash'],
             'type': transaction['type']
@@ -805,11 +810,16 @@ class NetworkManager:
         def propagate_account():
             """
             Propagates a new account to the network.
-            Expects JSON: { "address": "0zUserAddress123", "balance": "1000.0" }
+            Expects JSON with keys: 
+            "address", "balance", "public_key", "signature", "timestamp", "hash"
             """
             data = request.json
             address = data.get('address')
             balance = data.get('balance')
+            public_key = data.get('public_key')
+            signature = data.get('signature')
+            timestamp = data.get('timestamp')
+            tx_hash = data.get('hash')
 
             if not address or balance is None:
                 return jsonify({'error': "Missing 'address' or 'balance' in request."}), 400
@@ -819,15 +829,22 @@ class NetworkManager:
             except InvalidOperation:
                 return jsonify({'error': "Invalid balance format."}), 400
 
-            # Check if account already exists
+            # Check if the account already exists.
             if self.account_manager.get_account_balance(address) is not None:
                 return jsonify({'message': 'Account already exists.'}), 200
 
-            # Add the new account
+            # Add the new account.
             success = self.account_manager.add_account(address, balance_decimal)
             if success:
-                # Broadcast the new account to all peers
-                self.broadcast_new_account(address, balance_decimal)
+                # Call broadcast_new_account with all the required parameters.
+                self.broadcast_new_account(
+                    address, 
+                    balance_decimal, 
+                    public_key=public_key, 
+                    signature=signature, 
+                    timestamp=timestamp, 
+                    tx_hash=tx_hash
+                )
                 return jsonify({'message': 'Account propagated and added successfully.'}), 201
             else:
                 return jsonify({'error': 'Failed to propagate account.'}), 500
