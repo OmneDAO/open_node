@@ -154,32 +154,33 @@ class CryptoUtils:
     def verify_signature(public_key_str: str, transaction: dict, signature_base64: str) -> bool:
         """
         Verifies a signature against the transaction's canonical payload.
-        
+
         This function reconstructs the canonical payload by removing the 'hash' and 
-        'signature' keys from the transaction, then computes the SHA‑256 hash. It then
-        verifies that the computed hash matches the stored 'hash' field and that the signature
-        (decoded from base64) is valid for this hash using the provided hex‐encoded public key.
-        
+        'signature' keys from the transaction, then computes the SHA‑256 hash.
+        It then compares the computed hash with the stored 'hash' field and verifies
+        that the provided signature (decoded from base64) is valid for that hash using
+        the provided hex‑encoded public key.
+
         :param public_key_str: Hex-encoded public key.
-        :param transaction: Transaction dictionary (may contain extra keys such as 'hash' and 'signature').
+        :param transaction: Transaction dictionary (which must include a 'hash' field).
         :param signature_base64: Base64-encoded signature.
-        :return: True if the signature is valid; False otherwise.
+        :return: True if the signature is valid and the hash matches; False otherwise.
         """
         try:
-            # Rebuild the canonical payload by removing 'hash' and 'signature'
+            # Rebuild the canonical payload by excluding 'hash' and 'signature'
             canonical_tx = {k: transaction[k] for k in sorted(transaction) if k not in ['hash', 'signature']}
             canonical_payload = json.dumps(canonical_tx, sort_keys=True, cls=DecimalEncoder)
             
-            # Compute the SHA-256 hash of the canonical payload
+            # Compute the SHA‑256 hash of the canonical payload
             computed_hash = hashlib.sha256(canonical_payload.encode('utf-8')).hexdigest()
             
-            # Compare the computed hash with the transaction's stored 'hash'
+            # Compare the computed hash with the stored 'hash'
             stored_hash = transaction.get('hash')
             if stored_hash != computed_hash:
                 logging.error("Recomputed hash does not match the stored transaction hash.")
                 return False
-            
-            # Convert the public key from hex to bytes and create a verifying key.
+
+            # Convert the hex‑encoded public key to bytes and create a verifying key.
             public_key_bytes = bytes.fromhex(public_key_str)
             from ecdsa import VerifyingKey, BadSignatureError, SECP256k1
             verifying_key = VerifyingKey.from_string(public_key_bytes, curve=SECP256k1)
@@ -187,8 +188,10 @@ class CryptoUtils:
             # Decode the signature from base64.
             signature_bytes = base64.b64decode(signature_base64)
             
-            # Verify the signature against the computed hash (converted to bytes).
+            # Convert the computed hash (hex) into bytes.
             message_hash_bytes = bytes.fromhex(computed_hash)
+            
+            # Verify the signature against the computed hash.
             verifying_key.verify(signature_bytes, message_hash_bytes, hashfunc=hashlib.sha256)
             
             logging.info("Signature verification successful.")

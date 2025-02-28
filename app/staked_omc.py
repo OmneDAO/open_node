@@ -170,27 +170,27 @@ class StakedOMC:
             'public_key': treasury_public_key,
             'timestamp': datetime.now(timezone.utc).isoformat(),
             'sender': treasury_address,
-            'fee': 0.0  # Will be calculated below
+            'fee': "0"  # Will be calculated below
         }
         
-        # Determine the node address. This might come from the consensus engine or verifier.
-        # For example, if no validator is selected yet, you might default to the current node.
-        # (In your initializer you already do something like this.)
-        staking_tx['node_address'] = self.ledger.node.address  # example fallback
+        # Determine the node address (fallback to current node)
+        staking_tx['node_address'] = self.ledger.node.address
         
-        # Calculate fee for the staking transaction using the staking transaction dictionary directly
+        # Calculate fee for the staking transaction
         fee = fee_calculator.get_dynamic_fee(staking_tx, 0, 100)
         staking_tx['fee'] = format(fee, 'f')
-
-        # Create a canonical payload and compute the hash
+        
+        # Build canonical payload (exclude 'signature' and 'hash')
         sorted_data = {k: staking_tx[k] for k in sorted(staking_tx) if k not in ['signature', 'hash']}
         payload = json.dumps(sorted_data, sort_keys=True, cls=DecimalEncoder).encode()
-        staking_tx['hash'] = hashlib.sha256(payload).hexdigest()
+        # Compute the transaction hash
+        tx_hash = hashlib.sha256(payload).hexdigest()
+        staking_tx['hash'] = tx_hash
         
-        # Sign the staking transaction using the treasury private key
+        # Sign the computed hash (rather than the decoded payload dict)
         try:
-            payload_dict = json.loads(payload.decode('utf-8'))
-            staking_tx['signature'] = CryptoUtils().sign_message(treasury_private_key, payload_dict)
+            # Pass the hash string to sign_message so that it calls bytes.fromhex() internally.
+            staking_tx['signature'] = CryptoUtils().sign_message(treasury_private_key, tx_hash)
         except Exception as e:
             logger.error(f"Failed to sign staking transaction: {e}")
             return None
@@ -203,47 +203,53 @@ class StakedOMC:
             return None
         
         return staking_tx
-    
+
+
     def create_somc_mint_transaction(self,
-                                 recipient: str,
-                                 mint_amount: Decimal,
-                                 fee_calculator: DynamicFeeCalculator,
-                                 treasury_public_key: str,
-                                 treasury_private_key: str) -> Optional[Dict]:
+                                    recipient: str,
+                                    mint_amount: Decimal,
+                                    fee_calculator: DynamicFeeCalculator,
+                                    treasury_public_key: str,
+                                    treasury_private_key: str) -> Optional[Dict]:
         """
         Creates a transaction to record the minting of sOMC tokens to the recipient.
         This transaction will be included on-chain.
         """
         tx = {
-            'address': recipient,  # The recipient wallet receiving sOMC
-            'balance': mint_amount,  # The minted sOMC amount (already adjusted for decimals)
-            'type': 'somc_mint',  # Use a specific type for sOMC minting transactions
+            'address': recipient,
+            'balance': mint_amount,  # Already adjusted for decimals
+            'type': 'somc_mint',
             'timestamp': datetime.now(timezone.utc).isoformat(),
             'withdrawals': 0,
-            'fee': 0.0,  # Fee will be computed below
-            'sender': self.treasury_address,  # The treasury is issuing these tokens
+            'fee': "0",  # Fee will be computed below
+            'sender': self.treasury_address,
             'public_key': treasury_public_key,
         }
         # Calculate fee for the transaction
         fee = fee_calculator.get_dynamic_fee(tx, 0, 100)
         tx['fee'] = format(fee, 'f')
-        # Build canonical payload and compute transaction hash
+        
+        # Build canonical payload (exclude 'signature' and 'hash')
         sorted_data = {k: tx[k] for k in sorted(tx) if k not in ['signature', 'hash']}
         payload = json.dumps(sorted_data, sort_keys=True, cls=DecimalEncoder).encode()
-        tx['hash'] = hashlib.sha256(payload).hexdigest()
-        # Sign the transaction using the treasury private key
+        # Compute the transaction hash
+        tx_hash = hashlib.sha256(payload).hexdigest()
+        tx['hash'] = tx_hash
+        
+        # Sign the computed hash using the treasury private key.
         try:
-            payload_dict = json.loads(payload.decode('utf-8'))
-            tx['signature'] = CryptoUtils().sign_message(treasury_private_key, payload_dict)
+            tx['signature'] = CryptoUtils().sign_message(treasury_private_key, tx_hash)
         except Exception as e:
             logger.error(f"Failed to sign sOMC mint transaction: {e}")
             return None
+        
         # Validate that all required fields are present
         required_fields = ['hash', 'timestamp', 'sender', 'fee', 'signature', 'public_key']
         missing = [field for field in required_fields if field not in tx or tx[field] is None]
         if missing:
             logger.error(f"sOMC mint transaction validation failed. Missing: {missing}")
             return None
+        
         logger.info(f"sOMC mint transaction created successfully: {tx}")
         return tx
 
