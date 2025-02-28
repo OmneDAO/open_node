@@ -116,55 +116,47 @@ class Mempool:
     def add_transaction(self, transaction: Dict) -> bool:
         """
         Adds a transaction to the mempool after validating balance, nonce, signature, and consensus-specific criteria.
-
-        :param transaction: A dictionary containing transaction details.
-        :return: True if transaction is added successfully, False otherwise.
         """
         sender = transaction.get('sender')
-        amount = transaction.get('amount')
         fee = transaction.get('fee', '0')
         nonce = transaction.get('nonce')
         signature = transaction.get('signature')
         tx_type = transaction.get('type', '')
 
-        # For "account_creation" transactions, the 'receiver' field is not required.
         if tx_type == 'account_creation':
-            required_fields = [sender, amount, nonce, signature]
+            # For account creation, use "balance" and "amount" is already set.
+            required_fields = [sender, transaction.get('amount'), nonce, signature]
         else:
             receiver = transaction.get('receiver')
-            required_fields = [sender, receiver, amount, nonce, signature]
+            required_fields = [sender, receiver, transaction.get('amount'), nonce, signature]
 
         if not all(required_fields):
             self.logger.error("[Mempool] Transaction is missing required fields.")
             return False
 
         try:
-            amount = Decimal(str(amount))
+            amount = Decimal(str(transaction.get('amount')))
             fee = Decimal(str(fee))
             nonce = int(nonce)
         except (ValueError, InvalidOperation) as e:
             self.logger.error(f"[Mempool] Invalid transaction amount or nonce: {e}")
             return False
 
-        # Compute transaction hash
         tx_hash = self.compute_tx_hash(transaction)
         transaction['hash'] = tx_hash
         transaction['timestamp'] = time.time()
         transaction['confirmations'] = 0
 
-        # Build the canonical payload for signature verification.
         payload = json.dumps(
             {k: transaction[k] for k in sorted(transaction) if k not in ['signature', 'hash']},
             sort_keys=True,
             cls=DecimalEncoder
         )
 
-        # Verify the signature by passing payload, signature, and public key.
-        if not self.crypto_utils.verify_signature(payload, transaction.get('signature'), transaction.get('public_key')):
+        if not CryptoUtils.verify_signature(transaction.get('public_key'), transaction, transaction.get('signature')):
             self.logger.warning(f"[Mempool] Transaction {tx_hash} from {sender} rejected due to invalid signature.")
             return False
 
-        # Consensus-specific validation (e.g., eligibility, specific rules)
         if not self.consensus_engine.validate_transaction(transaction):
             self.logger.warning(f"[Mempool] Transaction {tx_hash} from {sender} rejected by consensus engine.")
             return False
@@ -174,12 +166,8 @@ class Mempool:
                 self.logger.error("[Mempool] Ledger not set. Cannot validate transaction against ledger state.")
                 return False
 
-            # Get the sender's last confirmed nonce from the ledger
             last_confirmed_nonce = self.ledger.account_manager.get_last_nonce(sender)
-            # Get the sender's last nonce in mempool
             last_mempool_nonce = self._get_last_mempool_nonce(sender)
-
-            # Expected nonce is last_mempool_nonce + 1
             expected_nonce = last_mempool_nonce + 1
             if nonce != expected_nonce:
                 self.logger.warning(
@@ -187,7 +175,6 @@ class Mempool:
                 )
                 return False
 
-            # Verify sender balance against the ledger's current state
             balance_on_ledger = self.ledger.account_manager.get_account_balance(sender)
             if balance_on_ledger < (amount + fee):
                 self.logger.warning(
@@ -196,7 +183,6 @@ class Mempool:
                 )
                 return False
 
-            # Check if mempool is full
             if len(self.transactions) >= self.max_size:
                 if self.fee_heap:
                     lowest_fee_tx = self.fee_heap[0][2]
@@ -212,7 +198,6 @@ class Mempool:
                     self.logger.warning(f"[Mempool] Mempool full. Transaction {tx_hash} rejected.")
                     return False
 
-            # All checks passed, add transaction to mempool.
             self.transactions.append(transaction)
             heapq.heappush(self.fee_heap, (-fee, transaction['timestamp'], transaction))
             self.current_interval_count += 1
