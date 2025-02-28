@@ -410,22 +410,25 @@ class NetworkManager:
         # Build the complete account creation transaction.
         transaction = {
             'address': address,
-            'balance': str(balance),  # Convert Decimal to string to maintain fixed‑point format
-            'type': 'account_creation',  # Custom transaction type for creating accounts
+            'balance': str(balance),  # Keep balance as string for fixed‑point formatting
+            'type': 'account_creation',
             'timestamp': timestamp if timestamp is not None else str(datetime.now(timezone.utc)),
             'withdrawals': 0,
-            'fee': "0",  # Account creation might be fee‑free
+            'fee': "0",
             'sender': address,
             'public_key': public_key,
-            'signature': signature,  # May be provided externally or set later
-            'hash': tx_hash         # May be provided externally or computed below
+            'signature': signature,
+            'hash': tx_hash
         }
 
-        # Add a nonce. For a new account, the last confirmed nonce should be 0, so we set nonce to 1.
+        # **Set the "amount" field equal to the "balance" for account creation transactions.**
+        transaction['amount'] = transaction['balance']
+
+        # Add a nonce.
         last_nonce = self.ledger.account_manager.get_last_nonce(address)
         transaction['nonce'] = last_nonce + 1
 
-        # If no hash is provided, compute a canonical payload (excluding signature and hash) and hash it.
+        # If no hash is provided, compute it.
         try:
             if not transaction['hash']:
                 payload = json.dumps(
@@ -444,7 +447,7 @@ class NetworkManager:
         else:
             logger.warning(f"Failed to add account creation transaction for {address} to mempool.")
 
-        # Prepare a propagation payload.
+        # Prepare propagation payload.
         propagation_payload = {
             'address': address,
             'balance': str(balance),
@@ -458,11 +461,9 @@ class NetworkManager:
             'type': transaction['type']
         }
 
-        # Get a copy of the current peers.
         with self.lock:
             current_peers = list(self.peers)
 
-        # Broadcast the transaction payload to each peer, excluding the specified peer if needed.
         for peer in current_peers:
             if exclude_peer_url and peer == exclude_peer_url:
                 continue
@@ -475,7 +476,7 @@ class NetworkManager:
                     logger.warning(f"Failed to propagate account to {peer}. Status Code: {response.status_code}")
             except requests.exceptions.RequestException as e:
                 logger.error(f"Error propagating account to {peer}: {e}")
-
+                
     # ----------------------------------------------------------------
     #  CHAIN SYNC METHODS
     # ----------------------------------------------------------------
