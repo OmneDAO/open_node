@@ -113,36 +113,26 @@ class CryptoUtils:
             self.logger.error(f"Failed to extract public key: {e}")
             raise
 
-    def sign_message(self, private_key: str, message: Any) -> str:
+    def sign_message(self, private_key: str, hash_hex: str) -> str:
         """
-        Signs a message using the provided private key.
-        For standard blockchain transactions the key is expected to be hex-encoded,
-        but if a PEM key is provided the function uses cryptography's signing method.
-        The message is assumed to be in canonical form (i.e. a dictionary with sorted keys)
-        and is first serialized (using DecimalEncoder) then hashed using SHA-256. That hash is then signed.
+        Signs the provided SHA‑256 hash using the given private key.
         
         :param private_key: The private key as a string (PEM or hex).
-        :param message: The message to sign (a dict or string, already in canonical form).
+        :param hash_hex: The SHA‑256 hash (hex string) of the canonical payload.
         :return: Base64-encoded signature.
         """
         try:
             key_obj = self.load_private_key(private_key)
-            if isinstance(message, dict):
-                message_str = json.dumps(message, sort_keys=True, cls=DecimalEncoder)
-            elif isinstance(message, str):
-                message_str = message
-            else:
-                message_str = str(message)
-            # Compute the SHA-256 digest of the canonical message string.
-            message_hash = hashlib.sha256(message_str.encode('utf-8')).digest()
-
+            # Convert the hash to bytes.
+            hash_bytes = bytes.fromhex(hash_hex)
+            
             # Branch based on key type.
             if hasattr(key_obj, 'private_numbers'):
-                # key_obj is a cryptography key
-                signature = key_obj.sign(message_hash, ec.ECDSA(hashes.SHA256()))
+                # key_obj is a cryptography key.
+                signature = key_obj.sign(hash_bytes, ec.ECDSA(hashes.SHA256()))
             else:
-                # key_obj is an ecdsa.SigningKey (hex-encoded)
-                signature = key_obj.sign(message_hash, hashfunc=hashlib.sha256)
+                # key_obj is an ecdsa.SigningKey (hex-encoded).
+                signature = key_obj.sign(hash_bytes, hashfunc=hashlib.sha256)
             signature_b64 = base64.b64encode(signature).decode('utf-8')
             self.logger.info("Message signed successfully.")
             return signature_b64
@@ -153,45 +143,41 @@ class CryptoUtils:
     @staticmethod
     def verify_signature(public_key_str: str, transaction: dict, signature_base64: str) -> bool:
         """
-        Verifies a signature against the transaction's canonical payload.
-
-        This function reconstructs the canonical payload by removing the 'hash' and 
-        'signature' keys from the transaction, then computes the SHA‑256 hash.
-        It then compares the computed hash with the stored 'hash' field and verifies
-        that the provided signature (decoded from base64) is valid for that hash using
-        the provided hex‑encoded public key.
-
-        :param public_key_str: Hex-encoded public key.
-        :param transaction: Transaction dictionary (which must include a 'hash' field).
-        :param signature_base64: Base64-encoded signature.
-        :return: True if the signature is valid and the hash matches; False otherwise.
+        Verifies a signature against the canonical payload of the transaction.
+        
+        The canonical payload is built from the transaction by excluding the 'signature'
+        and 'hash' fields. The SHA‑256 hash is computed over that payload and must match
+        the stored 'hash'. Then the signature (decoded from base64) is verified against that hash.
+        
+        :param public_key_str: Hex‑encoded public key.
+        :param transaction: Transaction dictionary (should include a 'hash' field).
+        :param signature_base64: Base64‑encoded signature.
+        :return: True if the signature is valid; False otherwise.
         """
         try:
-            # Rebuild the canonical payload by excluding 'hash' and 'signature'
-            canonical_tx = {k: transaction[k] for k in sorted(transaction) if k not in ['hash', 'signature']}
+            # Rebuild the canonical payload using exactly the keys provided by the client.
+            canonical_tx = {k: transaction[k] for k in sorted(transaction) if k not in ['signature', 'hash']}
             canonical_payload = json.dumps(canonical_tx, sort_keys=True, cls=DecimalEncoder)
+            logging.info(f"Canonical payload for verification: {canonical_payload}")
             
-            # Compute the SHA‑256 hash of the canonical payload
+            # Compute the SHA‑256 hash of the canonical payload.
             computed_hash = hashlib.sha256(canonical_payload.encode('utf-8')).hexdigest()
             
-            # Compare the computed hash with the stored 'hash'
+            # Compare with the stored hash.
             stored_hash = transaction.get('hash')
             if stored_hash != computed_hash:
                 logging.error("Recomputed hash does not match the stored transaction hash.")
                 return False
-
-            # Convert the hex‑encoded public key to bytes and create a verifying key.
+            
+            # Create the verifying key from the hex‑encoded public key.
             public_key_bytes = bytes.fromhex(public_key_str)
-            from ecdsa import VerifyingKey, BadSignatureError, SECP256k1
             verifying_key = VerifyingKey.from_string(public_key_bytes, curve=SECP256k1)
             
             # Decode the signature from base64.
             signature_bytes = base64.b64decode(signature_base64)
             
-            # Convert the computed hash (hex) into bytes.
+            # Use the computed hash (converted to bytes) for verification.
             message_hash_bytes = bytes.fromhex(computed_hash)
-            
-            # Verify the signature against the computed hash.
             verifying_key.verify(signature_bytes, message_hash_bytes, hashfunc=hashlib.sha256)
             
             logging.info("Signature verification successful.")

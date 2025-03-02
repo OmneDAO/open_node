@@ -410,42 +410,25 @@ class NetworkManager:
         # Build the complete account creation transaction.
         transaction = {
             'address': address,
-            'balance': str(balance),  # Keep balance as string for fixed‑point formatting
+            'balance': str(balance),
             'type': 'account_creation',
             'timestamp': timestamp if timestamp is not None else str(datetime.now(timezone.utc)),
-            'withdrawals': 0,
+            'withdrawals': "0",
             'fee': "0",
             'sender': address,
             'public_key': public_key,
             'signature': signature,
             'hash': tx_hash
         }
-
-        # **Set the "amount" field equal to the "balance" for account creation transactions.**
-        transaction['amount'] = transaction['balance']
-
-        # Add a nonce.
+        # Also set nonce exactly as provided (or use get_last_nonce if it's a new account)
         last_nonce = self.ledger.account_manager.get_last_nonce(address)
-        transaction['nonce'] = last_nonce + 1
-
-        # If no hash is provided, compute it.
-        try:
-            if not transaction['hash']:
-                payload = json.dumps(
-                    {k: transaction[k] for k in sorted(transaction) if k not in ['signature', 'hash']},
-                    sort_keys=True,
-                    cls=DecimalEncoder
-                )
-                transaction['hash'] = hashlib.sha256(payload.encode('utf-8')).hexdigest()
-        except Exception as e:
-            logger.error(f"Failed to process account creation transaction: {e}")
-            return
-
-        # Add the transaction to the mempool.
+        transaction['nonce'] = str(last_nonce + 1)
+        
+        # Do not modify any fields now.
         if self.mempool.add_transaction(transaction):
-            logger.info(f"Account creation transaction for {address} added to mempool.")
+            logging.info(f"Account creation transaction for {address} added to mempool.")
         else:
-            logger.warning(f"Failed to add account creation transaction for {address} to mempool.")
+            logging.warning(f"Failed to add account creation transaction for {address} to mempool.")
 
         # Prepare propagation payload.
         propagation_payload = {
