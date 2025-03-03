@@ -118,32 +118,33 @@ class Mempool:
         Adds a transaction to the mempool after validating balance, nonce, signature, 
         and consensus-specific criteria.
         """
-        sender = transaction.get('sender')
+        sender = transaction.get('address')
         receiver = transaction.get('receiver')
-        amount_field = transaction.get('amount')
-        balance_field = transaction.get('balance')
+        amount = transaction.get('amount')
+        balance = transaction.get('balance')
         fee = transaction.get('fee', '0')
         nonce = transaction.get('nonce')
+        public_key = transaction.get('public_key')
         signature = transaction.get('signature')
         timestamp = transaction.get('timestamp')
         tx_type = transaction.get('type', '')
 
         # For "account_creation" transactions, we do not use 'receiver' or 'amount'
         if tx_type == 'account_creation':
-            required_fields = [sender, balance_field, nonce, signature]
+            required_fields = [sender, balance, nonce, public_key, signature]
         else:
-            required_fields = [sender, receiver, amount_field, nonce, signature]
+            required_fields = [sender, receiver, amount, public_key, nonce, signature]
 
-        if not all(required_fields):
-            self.logger.error("[Mempool] Transaction is missing required fields.")
+        if any(field is None for field in required_fields):
+            self.logger.error("[Mempool] Transaction is missing required fields (one is None).")
             return False
 
         try:
             # For account_creation, use the balance field as the amount.
             if tx_type == 'account_creation':
-                amount = Decimal(str(balance_field))
+                amount = Decimal(str(balance))
             else:
-                amount = Decimal(str(amount_field))
+                amount = Decimal(str(amount))
             fee = Decimal(str(fee))
             nonce = int(nonce)
         except (ValueError, InvalidOperation) as e:
@@ -222,7 +223,7 @@ class Mempool:
             self.current_interval_count += 1
             self.logger.info(f"[Mempool] Transaction {tx_hash} from {sender} added to mempool with fee {fee}.")
             return True
-                
+                        
     def _get_last_mempool_nonce(self, sender: str) -> int:
         """
         Retrieves the last nonce for a sender within the mempool.

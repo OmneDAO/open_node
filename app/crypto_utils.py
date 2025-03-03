@@ -145,9 +145,9 @@ class CryptoUtils:
         """
         Verifies a signature against the transaction's canonical payload.
         
-        This function reconstructs the canonical payload by including only the following keys:
+        This function reconstructs the canonical payload using only the following keys:
         "address", "balance", "type", "nonce", "timestamp", "withdrawals", "fee", "sender", "public_key".
-        It then computes the SHA‑256 hash of this canonical payload, compares it to the stored 'hash' field,
+        It then computes the SHA‑256 hash using compact separators, compares it to the stored 'hash' field,
         and then verifies that the signature (decoded from base64) is valid for this hash using the provided
         hex‑encoded public key.
         
@@ -157,15 +157,16 @@ class CryptoUtils:
         :return: True if the signature is valid; False otherwise.
         """
         try:
-            # If transaction is a string, parse it into a dict.
+            # If transaction is a string, parse it.
             if isinstance(transaction, str):
                 transaction = json.loads(transaction)
             
-            # Define the fixed set of keys that form the canonical payload.
+            # Define the keys that form the canonical payload.
             keys_to_include = ["address", "balance", "type", "nonce", "timestamp", "withdrawals", "fee", "sender", "public_key"]
             canonical_tx = {k: transaction[k] for k in keys_to_include if k in transaction}
-            canonical_payload = json.dumps(canonical_tx, sort_keys=True, cls=DecimalEncoder)
             
+            # Build the canonical payload with compact separators.
+            canonical_payload = json.dumps(canonical_tx, sort_keys=True, cls=DecimalEncoder, separators=(',', ':'))
             logging.info(f"Canonical payload for verification: {canonical_payload}")
             
             # Compute the SHA‑256 hash of the canonical payload.
@@ -179,16 +180,15 @@ class CryptoUtils:
             
             # Convert the public key from hex to bytes and create a verifying key.
             public_key_bytes = bytes.fromhex(public_key_str)
-            from ecdsa import VerifyingKey, BadSignatureError, SECP256k1
             verifying_key = VerifyingKey.from_string(public_key_bytes, curve=SECP256k1)
             
             # Decode the signature from base64.
             signature_bytes = base64.b64decode(signature_base64)
             
-            # The message hash (as bytes) is the computed hash converted from hex.
+            # The message hash is the computed hash converted from hex to bytes.
             message_hash_bytes = bytes.fromhex(computed_hash)
             
-            # Verify the signature against the message hash.
+            # Verify the signature.
             verifying_key.verify(signature_bytes, message_hash_bytes, hashfunc=hashlib.sha256)
             
             logging.info("Signature verification successful.")
