@@ -143,41 +143,52 @@ class CryptoUtils:
     @staticmethod
     def verify_signature(public_key_str: str, transaction: dict, signature_base64: str) -> bool:
         """
-        Verifies a signature against the canonical payload of the transaction.
+        Verifies a signature against the transaction's canonical payload.
         
-        The canonical payload is built from the transaction by excluding the 'signature'
-        and 'hash' fields. The SHA‑256 hash is computed over that payload and must match
-        the stored 'hash'. Then the signature (decoded from base64) is verified against that hash.
+        This function reconstructs the canonical payload by including only the following keys:
+        "address", "balance", "type", "nonce", "timestamp", "withdrawals", "fee", "sender", "public_key".
+        It then computes the SHA‑256 hash of this canonical payload, compares it to the stored 'hash' field,
+        and then verifies that the signature (decoded from base64) is valid for this hash using the provided
+        hex‑encoded public key.
         
-        :param public_key_str: Hex‑encoded public key.
-        :param transaction: Transaction dictionary (should include a 'hash' field).
-        :param signature_base64: Base64‑encoded signature.
+        :param public_key_str: Hex-encoded public key.
+        :param transaction: Transaction dictionary (must include a 'hash' key).
+        :param signature_base64: Base64-encoded signature.
         :return: True if the signature is valid; False otherwise.
         """
         try:
-            # Rebuild the canonical payload using exactly the keys provided by the client.
-            canonical_tx = {k: transaction[k] for k in sorted(transaction) if k not in ['signature', 'hash']}
+            # If transaction is a string, parse it into a dict.
+            if isinstance(transaction, str):
+                transaction = json.loads(transaction)
+            
+            # Define the fixed set of keys that form the canonical payload.
+            keys_to_include = ["address", "balance", "type", "nonce", "timestamp", "withdrawals", "fee", "sender", "public_key"]
+            canonical_tx = {k: transaction[k] for k in keys_to_include if k in transaction}
             canonical_payload = json.dumps(canonical_tx, sort_keys=True, cls=DecimalEncoder)
+            
             logging.info(f"Canonical payload for verification: {canonical_payload}")
             
             # Compute the SHA‑256 hash of the canonical payload.
             computed_hash = hashlib.sha256(canonical_payload.encode('utf-8')).hexdigest()
             
-            # Compare with the stored hash.
+            # Compare the recomputed hash with the stored hash.
             stored_hash = transaction.get('hash')
             if stored_hash != computed_hash:
                 logging.error("Recomputed hash does not match the stored transaction hash.")
                 return False
             
-            # Create the verifying key from the hex‑encoded public key.
+            # Convert the public key from hex to bytes and create a verifying key.
             public_key_bytes = bytes.fromhex(public_key_str)
+            from ecdsa import VerifyingKey, BadSignatureError, SECP256k1
             verifying_key = VerifyingKey.from_string(public_key_bytes, curve=SECP256k1)
             
             # Decode the signature from base64.
             signature_bytes = base64.b64decode(signature_base64)
             
-            # Use the computed hash (converted to bytes) for verification.
+            # The message hash (as bytes) is the computed hash converted from hex.
             message_hash_bytes = bytes.fromhex(computed_hash)
+            
+            # Verify the signature against the message hash.
             verifying_key.verify(signature_bytes, message_hash_bytes, hashfunc=hashlib.sha256)
             
             logging.info("Signature verification successful.")
