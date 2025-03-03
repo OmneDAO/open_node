@@ -414,11 +414,15 @@ class NetworkManager:
                 logger.error(f"Failed to broadcast VRF output to peer {peer}: {e}")
                 
     def broadcast_new_account(self, address: str, balance: Decimal, 
-                          exclude_peer_url: Optional[str] = None, 
-                          public_key: Optional[str] = None, 
+                          exclude_peer_url: Optional[str] = None,
+                          fee: Optional[str] = None, 
+                          public_key: Optional[str] = None,
+                          nonce: Optional[str] = None, 
                           signature: Optional[str] = None,
                           timestamp: Optional[str] = None,
-                          tx_hash: Optional[str] = None):
+                          tx_hash: Optional[str] = None,
+                          type: Optional[str] = None,
+                          withdrawls: Optional[str] = None):
         """
         Creates and broadcasts a new account creation transaction.
         The transaction is added to the local mempool for inclusion on the blockchain,
@@ -436,19 +440,17 @@ class NetworkManager:
         # Build the complete account creation transaction.
         transaction = {
             'address': address,
-            'balance': str(balance),
-            'type': 'account_creation',
-            'timestamp': timestamp,
-            'withdrawals': "0",
-            'fee': "0",
-            'sender': address,
+            'balance': balance,
+            'fee': fee,
+            'nonce': nonce,
             'public_key': public_key,
+            'sender': address,
+            'timestamp': timestamp,
+            'type': type,
+            'withdrawals': withdrawls,
             'signature': signature,
             'hash': tx_hash
         }
-        # Also set nonce exactly as provided (or use get_last_nonce if it's a new account)
-        last_nonce = self.ledger.account_manager.get_last_nonce(address)
-        transaction['nonce'] = str(last_nonce + 1)
         
         # Do not modify any fields now.
         if self.mempool.add_transaction(transaction):
@@ -828,8 +830,17 @@ class NetworkManager:
                 balance = data.get('balance')
                 public_key = data.get('public_key')
                 signature = data.get('signature')
-                # Force the timestamp to be a string.
-                timestamp = str(data.get('timestamp'))
+                fee = data.get('fee')
+                type = data.get('type')
+                nonce = data.get('nonce')
+                withdrawls = data.get('withdrawls')
+                timestamp = data.get('timestamp')
+                if not isinstance(timestamp, str):
+                    try:
+                        # If it's a number, assume it's a Unix timestamp and convert to ISO string.
+                        timestamp = datetime.fromtimestamp(float(timestamp), timezone.utc).isoformat()
+                    except Exception as e:
+                        return jsonify({'error': "Invalid timestamp format."}), 400
                 tx_hash = data.get('hash')
 
                 if not address or balance is None:
@@ -849,13 +860,19 @@ class NetworkManager:
                 if success:
                     # Call broadcast_new_account with all the required parameters.
                     self.broadcast_new_account(
-                        address, 
-                        balance_decimal, 
-                        public_key=public_key, 
-                        signature=signature, 
-                        timestamp=timestamp, 
-                        tx_hash=tx_hash
-                    )
+                    address=address, 
+                    balance=balance_decimal,
+                    exclude_peer_url=None,
+                    public_key=public_key,
+                    signature=signature,
+                    timestamp=timestamp,
+                    tx_hash=tx_hash,
+                    type=type,
+                    nonce=nonce,
+                    fee=fee,
+                    withdrawls=withdrawls
+                )
+
                     return jsonify({'message': 'Account propagated and added successfully.'}), 201
                 else:
                     return jsonify({'error': 'Failed to propagate account.'}), 500
