@@ -14,6 +14,7 @@ from staked_omc import StakedOMC
 from permissions import PermissionManager
 from consensus_engine import ConsensusEngine
 from crypto_utils import DecimalEncoder
+from smart_contracts import SmartContracts
 import logging
 import os
 import hashlib
@@ -387,6 +388,31 @@ class NetworkManager:
             except requests.exceptions.RequestException as e:
                 logger.error(f"Failed to broadcast VRF output to peer {peer}: {e}")
                 
+    def broadcast_vrf_output(self, validator_id: str, proof: bytes):
+        """
+        Broadcasts the VRF output to all known peers.
+
+        :param validator_id: The identifier of the validator.
+        :param proof: The VRF proof bytes.
+        """
+        payload = {
+            "validator_id": validator_id,
+            "vrf_output": proof.hex()  # Convert bytes to hex string for transmission
+        }
+        headers = {"Content-Type": "application/json"}
+
+        with self.lock:
+            current_peers = list(self.peers)
+
+        for peer in current_peers:
+            url = f"{peer}/api/consensus/submit_vrf"
+            try:
+                response = requests.post(url, json=payload, headers=headers, timeout=5)
+                response.raise_for_status()
+                logger.info(f"Successfully broadcasted VRF output to peer: {peer}")
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Failed to broadcast VRF output to peer {peer}: {e}")
+                
     def broadcast_new_account(self, address: str, balance: Decimal, 
                           exclude_peer_url: Optional[str] = None, 
                           public_key: Optional[str] = None, 
@@ -412,7 +438,7 @@ class NetworkManager:
             'address': address,
             'balance': str(balance),
             'type': 'account_creation',
-            'timestamp': timestamp if timestamp is not None else str(datetime.now(timezone.utc)),
+            'timestamp': timestamp,
             'withdrawals': "0",
             'fee': "0",
             'sender': address,
@@ -792,46 +818,47 @@ class NetworkManager:
         
         @accounts_bp.route('/api/propagate_account', methods=['POST'])
         def propagate_account():
-            """
-            Propagates a new account to the network.
-            Expects JSON with keys: 
-            "address", "balance", "public_key", "signature", "timestamp", "hash"
-            """
-            data = request.json
-            address = data.get('address')
-            balance = data.get('balance')
-            public_key = data.get('public_key')
-            signature = data.get('signature')
-            timestamp = data.get('timestamp')
-            tx_hash = data.get('hash')
+                """
+                Propagates a new account to the network.
+                Expects JSON with keys: 
+                "address", "balance", "public_key", "signature", "timestamp", "hash"
+                """
+                data = request.json
+                address = data.get('address')
+                balance = data.get('balance')
+                public_key = data.get('public_key')
+                signature = data.get('signature')
+                # Force the timestamp to be a string.
+                timestamp = str(data.get('timestamp'))
+                tx_hash = data.get('hash')
 
-            if not address or balance is None:
-                return jsonify({'error': "Missing 'address' or 'balance' in request."}), 400
+                if not address or balance is None:
+                    return jsonify({'error': "Missing 'address' or 'balance' in request."}), 400
 
-            try:
-                balance_decimal = Decimal(str(balance))
-            except InvalidOperation:
-                return jsonify({'error': "Invalid balance format."}), 400
+                try:
+                    balance_decimal = Decimal(str(balance))
+                except InvalidOperation:
+                    return jsonify({'error': "Invalid balance format."}), 400
 
-            # Check if the account already exists.
-            if self.account_manager.get_account_balance(address) is not None:
-                return jsonify({'message': 'Account already exists.'}), 200
+                # Check if account already exists
+                if self.account_manager.get_account_balance(address) is not None:
+                    return jsonify({'message': 'Account already exists.'}), 200
 
-            # Add the new account.
-            success = self.account_manager.add_account(address, balance_decimal)
-            if success:
-                # Call broadcast_new_account with all the required parameters.
-                self.broadcast_new_account(
-                    address, 
-                    balance_decimal, 
-                    public_key=public_key, 
-                    signature=signature, 
-                    timestamp=timestamp, 
-                    tx_hash=tx_hash
-                )
-                return jsonify({'message': 'Account propagated and added successfully.'}), 201
-            else:
-                return jsonify({'error': 'Failed to propagate account.'}), 500
+                # Add the new account
+                success = self.account_manager.add_account(address, balance_decimal)
+                if success:
+                    # Call broadcast_new_account with all the required parameters.
+                    self.broadcast_new_account(
+                        address, 
+                        balance_decimal, 
+                        public_key=public_key, 
+                        signature=signature, 
+                        timestamp=timestamp, 
+                        tx_hash=tx_hash
+                    )
+                    return jsonify({'message': 'Account propagated and added successfully.'}), 201
+                else:
+                    return jsonify({'error': 'Failed to propagate account.'}), 500
         
         @accounts_bp.route('/api/retrieve_accounts', methods=['GET'])
         def retrieve_accounts():
@@ -1556,13 +1583,6 @@ def main():
         transaction_service=mempool
     )
     ledger.smart_contracts = smart_contracts  # Assign smart contracts to ledger
-
-    # Initialize Initializer with the necessary parameters
-    try:
-        initializer = Initializer(ledger, TREASURY_ADDRESS, TREASURY_PUBLIC_KEY, TREASURY_PRIVATE_KEY)
-    except ValueError as e:
-        logging.critical(f"Initializer failed: {e}")
-        sys.exit(1)
 
     # Determine node role
     node_role = os.getenv("NODE_ROLE", "validator_initial")  # Set to 'validator_initial' for the first validator
