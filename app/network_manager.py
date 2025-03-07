@@ -413,7 +413,7 @@ class NetworkManager:
             except requests.exceptions.RequestException as e:
                 logger.error(f"Failed to broadcast VRF output to peer {peer}: {e}")
                 
-    def broadcast_new_account(self, address: str, balance: Decimal, 
+    def broadcast_new_account(self, sender: str, balance: str, 
                           exclude_peer_url: Optional[str] = None,
                           fee: Optional[str] = None, 
                           public_key: Optional[str] = None,
@@ -422,55 +422,42 @@ class NetworkManager:
                           timestamp: Optional[str] = None,
                           tx_hash: Optional[str] = None,
                           type: Optional[str] = None,
-                          withdrawls: Optional[str] = None):
+                          data: Optional[dict] = None):
         """
         Creates and broadcasts a new account creation transaction.
         The transaction is added to the local mempool for inclusion on the blockchain,
-        and then propagated to all known peers (except an optional excluded peer).
-
-        :param address: The address of the new account.
-        :param balance: The initial balance of the new account.
-        :param exclude_peer_url: Optional URL of a peer to exclude from broadcasting.
-        :param public_key: Optional public key for the new account.
-        :param signature: Optional signature if the transaction is pre-signed.
-        :param timestamp: Optional timestamp for the transaction (ISO format).
-        :param tx_hash: Optional precomputed hash of the transaction.
+        and then propagated to all known peers.
+        
+        The transaction payload now uses 'sender' as the address and requires a 'data' field,
+        which can contain additional information (e.g. withdrawals). This 'data' field must always be present.
         """
+        # If no extra data is provided, default to an empty dict.
+        if data is None:
+            data = {}
 
         # Build the complete account creation transaction.
         transaction = {
-            'address': address,
+            'sender': sender,
             'balance': balance,
             'fee': fee,
             'nonce': nonce,
             'public_key': public_key,
-            'sender': address,
             'timestamp': timestamp,
             'type': type,
-            'withdrawals': withdrawls,
+            'data': data,             # <-- now required and holds extra fields (e.g. withdrawals)
             'signature': signature,
             'hash': tx_hash
         }
         
         # Do not modify any fields now.
         if self.mempool.add_transaction(transaction):
-            logging.info(f"Account creation transaction for {address} added to mempool.")
+            logging.info(f"Account creation transaction for {sender} added to mempool.")
         else:
-            logging.warning(f"Failed to add account creation transaction for {address} to mempool.")
+            logging.warning(f"Failed to add account creation transaction for {sender} to mempool.")
 
         # Prepare propagation payload.
-        propagation_payload = {
-            'address': address,
-            'balance': str(balance),
-            'public_key': public_key,
-            'signature': signature,
-            'nonce': transaction['nonce'],
-            'fee': transaction['fee'],
-            'sender': transaction['sender'],
-            'timestamp': transaction['timestamp'],
-            'hash': transaction['hash'],
-            'type': transaction['type']
-        }
+        # Here we simply send the full transaction (including the 'data' field).
+        propagation_payload = transaction
 
         with self.lock:
             current_peers = list(self.peers)
@@ -820,47 +807,52 @@ class NetworkManager:
         
         @accounts_bp.route('/api/propagate_account', methods=['POST'])
         def propagate_account():
-                """
-                Propagates a new account to the network.
-                Expects JSON with keys: 
-                "address", "balance", "public_key", "signature", "timestamp", "hash"
-                """
-                data = request.json
-                address = data.get('address')
-                balance = data.get('balance')
-                public_key = data.get('public_key')
-                signature = data.get('signature')
-                fee = data.get('fee')
-                type = data.get('type')
-                nonce = data.get('nonce')
-                withdrawls = data.get('withdrawls')
-                timestamp = data.get('timestamp')
-                if not isinstance(timestamp, str):
-                    try:
-                        # If it's a number, assume it's a Unix timestamp and convert to ISO string.
-                        timestamp = datetime.fromtimestamp(float(timestamp), timezone.utc).isoformat()
-                    except Exception as e:
-                        return jsonify({'error': "Invalid timestamp format."}), 400
-                tx_hash = data.get('hash')
-
-                if not address or balance is None:
-                    return jsonify({'error': "Missing 'address' or 'balance' in request."}), 400
-
+            """
+            Propagates a new account to the network.
+            Expects JSON with keys:
+            "sender", "balance", "public_key", "signature", "timestamp", "hash", "type", "nonce", "fee", "data"
+            The 'data' field is required (even if empty) and may contain additional fields (e.g. withdrawals).
+            """
+            data = request.json
+            sender = data.get('sender')
+            balance = data.get('balance')
+            public_key = data.get('public_key')
+            signature = data.get('signature')
+            fee = data.get('fee')
+            type = data.get('type')
+            nonce = data.get('nonce')
+            timestamp = data.get('timestamp')
+            tx_hash = data.get('hash')
+            
+            # 'data' field is required—default to empty if missing.
+            extra_data = data.get('data')
+            if extra_data is None:
+                extra_data = {}
+            
+            if not isinstance(timestamp, str):
                 try:
-                    balance_decimal = Decimal(str(balance))
-                except InvalidOperation:
-                    return jsonify({'error': "Invalid balance format."}), 400
+                    timestamp = datetime.fromtimestamp(float(timestamp), timezone.utc).isoformat()
+                except Exception as e:
+                    return jsonify({'error': "Invalid timestamp format."}), 400
 
-                # Check if account already exists
-                if self.account_manager.get_account_balance(address) is not None:
-                    return jsonify({'message': 'Account already exists.'}), 200
+            if not sender or balance is None:
+                return jsonify({'error': "Missing 'sender' or 'balance' in request."}), 400
 
-                # Add the new account
-                success = self.account_manager.add_account(address, balance_decimal)
-                if success:
-                    # Call broadcast_new_account with all the required parameters.
-                    self.broadcast_new_account(
-                    address=address, 
+            try:
+                balance_decimal = Decimal(str(balance))
+            except InvalidOperation:
+                return jsonify({'error': "Invalid balance format."}), 400
+
+            # Check if account already exists.
+            if self.account_manager.get_account_balance(sender) is not None:
+                return jsonify({'message': 'Account already exists.'}), 200
+
+            # Add the new account.
+            success = self.account_manager.add_account(sender, balance_decimal)
+            if success:
+                # Call broadcast_new_account with the new transaction structure.
+                self.broadcast_new_account(
+                    sender=sender, 
                     balance=balance_decimal,
                     exclude_peer_url=None,
                     public_key=public_key,
@@ -870,13 +862,12 @@ class NetworkManager:
                     type=type,
                     nonce=nonce,
                     fee=fee,
-                    withdrawls=withdrawls
+                    data=extra_data  # pass the entire extra data object
                 )
-
-                    return jsonify({'message': 'Account propagated and added successfully.'}), 201
-                else:
-                    return jsonify({'error': 'Failed to propagate account.'}), 500
-        
+                return jsonify({'message': 'Account propagated and added successfully.'}), 201
+            else:
+                return jsonify({'error': 'Failed to propagate account.'}), 500
+            
         @accounts_bp.route('/api/retrieve_accounts', methods=['GET'])
         def retrieve_accounts():
             """

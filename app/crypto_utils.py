@@ -145,14 +145,14 @@ class CryptoUtils:
         """
         Verifies a signature against the transaction's canonical payload.
         
-        This function reconstructs the canonical payload using only the following keys:
-        "address", "balance", "type", "nonce", "timestamp", "withdrawals", "fee", "sender", "public_key".
-        It then computes the SHA‑256 hash using compact separators, compares it to the stored 'hash' field,
-        and then verifies that the signature (decoded from base64) is valid for this hash using the provided
-        hex‑encoded public key.
+        This function expects that the transaction includes a required 'data' field (even if empty)
+        and a 'confirmations' field. It then rebuilds the canonical payload using all keys except 'signature' and 'hash',
+        using sorted keys and compact separators. The entire payload—including the 'data' field—is used for hashing.
+        It then computes the SHA‑256 hash and compares it to the stored 'hash' field, and finally
+        verifies that the signature (decoded from base64) is valid for that hash using the provided hex‑encoded public key.
         
         :param public_key_str: Hex-encoded public key.
-        :param transaction: Transaction dictionary (must include a 'hash' key).
+        :param transaction: Transaction dictionary (must include a 'hash' key and a 'data' key, even if empty).
         :param signature_base64: Base64-encoded signature.
         :return: True if the signature is valid; False otherwise.
         """
@@ -161,13 +161,23 @@ class CryptoUtils:
             if isinstance(transaction, str):
                 transaction = json.loads(transaction)
             
-            # Define the keys that form the canonical payload.
-            keys_to_include = ["address", "balance", "type", "nonce", "timestamp", "withdrawals", "fee", "sender", "public_key"]
-            canonical_tx = {k: transaction[k] for k in keys_to_include if k in transaction}
-            
-            # Build the canonical payload with compact separators.
-            canonical_payload = json.dumps(canonical_tx, sort_keys=True, cls=DecimalEncoder, separators=(',', ':'))
+            # Ensure 'data' is present (if not, default to {}).
+            if 'data' not in transaction:
+                transaction['data'] = {}
+
+            # (Optionally, you may also require that 'confirmations' is present.)
+            if 'confirmations' not in transaction:
+                transaction['confirmations'] = 0
+
+            # Build the canonical payload including all keys except 'signature' and 'hash'.
+            canonical_payload = json.dumps(
+                {k: transaction[k] for k in sorted(transaction) if k not in ['signature', 'hash']},
+                sort_keys=True,
+                cls=DecimalEncoder,
+                separators=(',', ':')
+            )
             logging.info(f"Canonical payload for verification: {canonical_payload}")
+            logging.info(f"Canonical payload repr: {repr(canonical_payload)}")
             
             # Compute the SHA‑256 hash of the canonical payload.
             computed_hash = hashlib.sha256(canonical_payload.encode('utf-8')).hexdigest()
@@ -178,7 +188,7 @@ class CryptoUtils:
                 logging.error("Recomputed hash does not match the stored transaction hash.")
                 return False
             
-            # Convert the public key from hex to bytes and create a verifying key.
+            # Create verifying key from the provided public key.
             public_key_bytes = bytes.fromhex(public_key_str)
             verifying_key = VerifyingKey.from_string(public_key_bytes, curve=SECP256k1)
             
