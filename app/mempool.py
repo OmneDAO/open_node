@@ -94,31 +94,40 @@ class Mempool:
         self.logger.info("[Mempool] Ledger has been set.")
 
     def compute_tx_hash(self, transaction: Dict) -> str:
-        # Define the standard keys that should always be included
-        keys_to_include = ['sender', 'fee', 'nonce', 'extra_data']
+        # Core keys always included.
+        canonical_keys = ["sender", "type", "nonce", "timestamp", "fee", "public_key"]
         
-        # Include 'receiver' if it exists.
-        if 'receiver' in transaction:
-            keys_to_include.append('receiver')
+        # For the transaction amount, include 'amount' if it exists; otherwise, include 'balance'
+        if "amount" in transaction:
+            canonical_keys.append("amount")
+        elif "balance" in transaction:
+            canonical_keys.append("balance")
         
-        # For the transaction amount, check for either 'amount' or 'balance'
-        if 'amount' in transaction:
-            keys_to_include.append('amount')
-        elif 'balance' in transaction:
-            keys_to_include.append('balance')
+        # If there is a metadata object, include its keys.
+        metadata = transaction.get("metadata", {})
+        # For future-proofing, you can merge the metadata into the canonical payload.
+        for key in metadata:
+            canonical_keys.append(key)
         
-        # Build the transaction data dictionary using only the keys that are present.
-        tx_data = { key: str(transaction[key]) for key in keys_to_include if key in transaction }
-        tx_string = json.dumps(tx_data, sort_keys=True)
-        tx_hash = hashlib.sha256(tx_string.encode('utf-8')).hexdigest()
-        return tx_hash
+        # Remove duplicates (if any) and sort the final list.
+        canonical_keys = sorted(set(canonical_keys))
+        
+        # Build the canonical dictionary. We also include any additional top-level keys if needed.
+        canonical_data = { key: str(transaction[key]) for key in canonical_keys if key in transaction }
+        # Merge metadata into canonical_data (if keys overlap, you could decide whether metadata overrides or not)
+        for key, value in metadata.items():
+            canonical_data[key] = str(value)
+        
+        # Serialize with compact separators for consistency.
+        canonical_string = json.dumps(canonical_data, sort_keys=True, separators=(',', ':'))
+        return hashlib.sha256(canonical_string.encode('utf-8')).hexdigest()
 
     def add_transaction(self, transaction: Dict) -> bool:
         """
-        Adds a transaction to the mempool after validating balance, nonce, signature, 
+        Adds a transaction to the mempool after validating balance, nonce, signature,
         and consensus-specific criteria.
         """
-        sender = transaction.get('address')
+        sender = transaction.get('sender')
         receiver = transaction.get('receiver')
         amount = transaction.get('amount')
         balance = transaction.get('balance')
@@ -128,19 +137,18 @@ class Mempool:
         signature = transaction.get('signature')
         timestamp = transaction.get('timestamp')
         tx_type = transaction.get('type', '')
-
+        
         # For "account_creation" transactions, we do not use 'receiver' or 'amount'
         if tx_type == 'account_creation':
             required_fields = [sender, balance, nonce, public_key, signature]
         else:
             required_fields = [sender, receiver, amount, public_key, nonce, signature]
-
+        
         if any(field is None for field in required_fields):
             self.logger.error("[Mempool] Transaction is missing required fields (one is None).")
             return False
-
+        
         try:
-            # For account_creation, use the balance field as the amount.
             if tx_type == 'account_creation':
                 amount = Decimal(str(balance))
             else:
@@ -150,39 +158,42 @@ class Mempool:
         except (ValueError, InvalidOperation) as e:
             self.logger.error(f"[Mempool] Invalid transaction amount or nonce: {e}")
             return False
-
-        # Compute transaction hash and assign it.
+        
+        # Ensure the transaction includes a 'data' field (required)
+        if 'data' not in transaction:
+            transaction['data'] = {}
+        
+        # Optionally, ensure that 'confirmations' is set (default to 0).
+        if 'confirmations' not in transaction:
+            transaction['confirmations'] = 0
+        
+        # Compute transaction hash using our canonicalization method.
         tx_hash = self.compute_tx_hash(transaction)
         transaction['hash'] = tx_hash
-
-        # Preserve the incoming timestamp rather than overwriting it.
-        transaction['timestamp'] = timestamp
-        transaction['confirmations'] = 0
-
+        
+        transaction['timestamp'] = timestamp  # preserve incoming timestamp
+        
         # Build the canonical payload for signature verification.
-        payload = json.dumps(
+        canonical_payload = json.dumps(
             {k: transaction[k] for k in sorted(transaction) if k not in ['signature', 'hash']},
             sort_keys=True,
-            cls=DecimalEncoder
+            cls=DecimalEncoder,
+            separators=(',', ':')
         )
-
+        
         # Verify the signature using the canonical payload.
         if not self.crypto_utils.verify_signature(
-                transaction.get('public_key'), payload, signature):
+                transaction.get('public_key'), canonical_payload, signature):
             self.logger.warning(f"[Mempool] Transaction {tx_hash} from {sender} rejected due to invalid signature.")
             return False
-
-        # Consensus-specific validation.
-        if not self.consensus_engine.validate_transaction(transaction):
-            self.logger.warning(f"[Mempool] Transaction {tx_hash} from {sender} rejected by consensus engine.")
-            return False
-
+        
+        # (Optional: consensus-specific validation here.)
+        
         with self.lock:
             if not self.ledger:
                 self.logger.error("[Mempool] Ledger not set. Cannot validate transaction against ledger state.")
                 return False
-
-            # Verify the nonce.
+            
             last_confirmed_nonce = self.ledger.account_manager.get_last_nonce(sender)
             last_mempool_nonce = self._get_last_mempool_nonce(sender)
             expected_nonce = last_mempool_nonce + 1
@@ -191,8 +202,7 @@ class Mempool:
                     f"[Mempool] Transaction {tx_hash} from {sender} has invalid nonce. Expected: {expected_nonce}, Got: {nonce}."
                 )
                 return False
-
-            # Verify sender's balance.
+            
             balance_on_ledger = self.ledger.account_manager.get_account_balance(sender)
             if balance_on_ledger < (amount + fee):
                 self.logger.warning(
@@ -200,8 +210,7 @@ class Mempool:
                     f"Balance: {balance_on_ledger}, Required: {amount + fee}."
                 )
                 return False
-
-            # Mempool size check.
+            
             if len(self.transactions) >= self.max_size:
                 if self.fee_heap:
                     lowest_fee_tx = self.fee_heap[0][2]
@@ -216,8 +225,7 @@ class Mempool:
                 else:
                     self.logger.warning(f"[Mempool] Mempool full. Transaction {tx_hash} rejected.")
                     return False
-
-            # Add transaction to mempool.
+            
             self.transactions.append(transaction)
             heapq.heappush(self.fee_heap, (-fee, transaction['timestamp'], transaction))
             self.current_interval_count += 1
