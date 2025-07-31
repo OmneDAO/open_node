@@ -13,10 +13,16 @@ from staking import StakingMngr
 from staked_omc import StakedOMC
 from permissions import PermissionManager
 from consensus_engine import ConsensusEngine
-from crypto_utils import DecimalEncoder
+from crypto_utils import DecimalEncoder, CryptoUtils
 from smart_contracts import SmartContracts
+from verifier import Verifier
+from vrf_utils import VRFUtils
+from validator_api import validator_api, initialize_validator_api
+from pymongo import MongoClient
+from pymongo.server_api import ServerApi
 import logging
 import os
+import sys
 import hashlib
 from block import Block
 import threading
@@ -69,7 +75,9 @@ class NetworkManager:
                  fee_calculator: DynamicFeeCalculator = None,
                  port: int = 3400,
                  omc: Optional[OMC] = None,
-                 account_manager: Optional[AccountManager] = None):
+                 account_manager: Optional[AccountManager] = None,
+                 staking_manager: Optional[StakingMngr] = None,
+                 verifier: Optional[Verifier] = None):
         """
         :param ledger: A reference to the Ledger instance
         :param mempool: Reference to the Mempool instance
@@ -77,6 +85,9 @@ class NetworkManager:
         :param fee_calculator: Reference to DynamicFeeCalculator for fee calculations
         :param port: The port on which this node listens for incoming requests
         :param omc: Reference to the OMC instance for staking and reward management
+        :param account_manager: Reference to the AccountManager instance
+        :param staking_manager: Reference to the StakingMngr instance
+        :param verifier: Reference to the Verifier instance
         """
         self.ledger = ledger
         app.config["LEDGER"] = ledger
@@ -85,6 +96,8 @@ class NetworkManager:
         self.fee_calculator = fee_calculator
         self.omc = omc
         self.account_manager = account_manager
+        self.staking_manager = staking_manager
+        self.verifier = verifier
 
         self.port = port
         self.peers = set()  # Track known peer URLs
@@ -413,50 +426,50 @@ class NetworkManager:
             except requests.exceptions.RequestException as e:
                 logger.error(f"Failed to broadcast VRF output to peer {peer}: {e}")
                 
-    def broadcast_new_account(self, sender: str, balance: str, 
-                          exclude_peer_url: Optional[str] = None,
-                          fee: Optional[str] = None, 
-                          public_key: Optional[str] = None,
-                          nonce: Optional[str] = None, 
-                          signature: Optional[str] = None,
-                          timestamp: Optional[str] = None,
-                          tx_hash: Optional[str] = None,
-                          type: Optional[str] = None,
-                          data: Optional[dict] = None):
+    def broadcast_new_account(
+        self,
+        sender: str, 
+        balance: str,
+        exclude_peer_url: Optional[str],
+        fee: str, 
+        public_key: str,
+        nonce: str, 
+        signature: str,
+        timestamp: str,
+        tx_hash: str,
+        type: str,
+        data: dict
+    ) -> Optional[str]:
         """
         Creates and broadcasts a new account creation transaction.
         The transaction is added to the local mempool for inclusion on the blockchain,
         and then propagated to all known peers.
-        
-        The transaction payload now uses 'sender' as the address and requires a 'data' field,
-        which can contain additional information (e.g. withdrawals). This 'data' field must always be present.
+        Returns the local mempool hash if added successfully, otherwise None.
         """
-        # If no extra data is provided, default to an empty dict.
         if data is None:
             data = {}
 
-        # Build the complete account creation transaction.
         transaction = {
             'sender': sender,
             'balance': balance,
-            'fee': fee,
-            'nonce': nonce,
+            'fee': fee if fee else "0",
+            'nonce': nonce if nonce else "0",
             'public_key': public_key,
             'timestamp': timestamp,
             'type': type,
-            'data': data,             # <-- now required and holds extra fields (e.g. withdrawals)
+            'data': data,
             'signature': signature,
-            'hash': tx_hash
+            'hash': tx_hash  # user-provided, but not used for verification
         }
-        
-        # Do not modify any fields now.
-        if self.mempool.add_transaction(transaction):
-            logging.info(f"Account creation transaction for {sender} added to mempool.")
+
+        success, local_hash = self.mempool.add_transaction(transaction)
+        if success:
+            logging.info(f"Account creation transaction for {sender} added to mempool. local_hash={local_hash}")
         else:
             logging.warning(f"Failed to add account creation transaction for {sender} to mempool.")
+            return None
 
-        # Prepare propagation payload.
-        # Here we simply send the full transaction (including the 'data' field).
+        # Prepare propagation payload
         propagation_payload = transaction
 
         with self.lock:
@@ -474,6 +487,8 @@ class NetworkManager:
                     logger.warning(f"Failed to propagate account to {peer}. Status Code: {response.status_code}")
             except requests.exceptions.RequestException as e:
                 logger.error(f"Error propagating account to {peer}: {e}")
+
+        return local_hash
                 
     # ----------------------------------------------------------------
     #  CHAIN SYNC METHODS
@@ -720,15 +735,104 @@ class NetworkManager:
             """
             return jsonify({"status": "ok"}), 200
 
+        @health_bp.route('/api/health/detailed', methods=['GET'])
+        def detailed_health_check():
+            """
+            Detailed health check with system metrics and status.
+            """
+            try:
+                # Import performance monitor if available
+                try:
+                    from performance_monitor import PerformanceMonitor
+                    monitor = PerformanceMonitor()
+                    metrics = monitor.get_current_metrics()
+                except ImportError:
+                    metrics = {"error": "Performance monitoring not available"}
+                
+                # Basic system status
+                status = {
+                    "status": "ok",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "node_id": getattr(self, 'node_id', 'unknown'),
+                    "blockchain_height": len(self.ledger.chain) if self.ledger else 0,
+                    "mempool_size": len(self.mempool.transactions) if self.mempool else 0,
+                    "is_mining": getattr(self.consensus_engine, 'is_mining', False) if self.consensus_engine else False,
+                    "peer_count": len(getattr(self, 'peers', [])),
+                    "performance_metrics": metrics
+                }
+                
+                return jsonify(status), 200
+            except Exception as e:
+                logger.error(f"Health check failed: {e}")
+                return jsonify({
+                    "status": "error", 
+                    "error": str(e),
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }), 500
+
+        @health_bp.route('/api/metrics', methods=['GET'])
+        def get_metrics():
+            """
+            Get performance and system metrics for monitoring.
+            """
+            try:
+                # Import performance monitor if available
+                try:
+                    from performance_monitor import PerformanceMonitor
+                    monitor = PerformanceMonitor()
+                    return jsonify(monitor.get_detailed_metrics()), 200
+                except ImportError:
+                    return jsonify({"error": "Performance monitoring not available"}), 503
+            except Exception as e:
+                logger.error(f"Metrics endpoint failed: {e}")
+                return jsonify({"error": str(e)}), 500
+
+        @health_bp.route('/api/status', methods=['GET'])
+        def get_status():
+            """
+            Get comprehensive node status for diagnostics.
+            """
+            try:
+                status = {
+                    "node_info": {
+                        "node_id": getattr(self, 'node_id', 'unknown'),
+                        "version": "1.0.0",  # Should come from config
+                        "uptime": time.time() - getattr(self, 'start_time', time.time()),
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    },
+                    "blockchain": {
+                        "height": len(self.ledger.chain) if self.ledger else 0,
+                        "last_block_time": self.ledger.chain[-1].timestamp if self.ledger and self.ledger.chain else None,
+                        "difficulty": getattr(self.consensus_engine, 'difficulty', 'unknown') if self.consensus_engine else 'unknown'
+                    },
+                    "network": {
+                        "peer_count": len(getattr(self, 'peers', [])),
+                        "connected_peers": getattr(self, 'peers', []),
+                        "is_syncing": getattr(self, 'is_syncing', False)
+                    },
+                    "mempool": {
+                        "transaction_count": len(self.mempool.transactions) if self.mempool else 0,
+                        "pending_size": len(getattr(self.mempool, 'transactions', {}))
+                    },
+                    "consensus": {
+                        "is_mining": getattr(self.consensus_engine, 'is_mining', False) if self.consensus_engine else False,
+                        "validator_status": "active" if self.consensus_engine else "inactive"
+                    }
+                }
+                
+                return jsonify(status), 200
+            except Exception as e:
+                logger.error(f"Status endpoint failed: {e}")
+                return jsonify({"error": str(e)}), 500
+
         # 6. Full Chain Retrieval Endpoint
         @block_bp.route('/api/block/full_chain', methods=['GET'])
         def full_chain():
-            """
-            Endpoint to retrieve the full blockchain.
-            Useful for chain synchronization.
-            """
+            logger.info("full_chain endpoint called - about to acquire ledger.lock.")
             with self.ledger.lock:
+                logger.info("full_chain endpoint: lock acquired, building chain_data.")
                 chain_data = [block.to_dict() for block in self.ledger.chain]
+            logger.info("full_chain endpoint: lock released, returning data.")
             return jsonify({"chain": chain_data}), 200
         
         # 7. Accounts Management Endpoints
@@ -810,8 +914,15 @@ class NetworkManager:
             """
             Propagates a new account to the network.
             Expects JSON with keys:
-            "sender", "balance", "public_key", "signature", "timestamp", "hash", "type", "nonce", "fee", "data"
-            The 'data' field is required (even if empty) and may contain additional fields (e.g. withdrawals).
+            "sender", "balance", "public_key", "signature", "timestamp", 
+            "hash", "type", "nonce", "fee", "data"
+            
+            Returns:
+            {
+                "message": "Account propagated and added successfully.",
+                "local_hash": "<mempool-local-hash>"
+            }
+            on success, or an error JSON on failure.
             """
             data = request.json
             sender = data.get('sender')
@@ -819,52 +930,51 @@ class NetworkManager:
             public_key = data.get('public_key')
             signature = data.get('signature')
             fee = data.get('fee')
-            type = data.get('type')
+            tx_type = data.get('type')
             nonce = data.get('nonce')
             timestamp = data.get('timestamp')
             tx_hash = data.get('hash')
-            
-            # 'data' field is required—default to empty if missing.
-            extra_data = data.get('data')
-            if extra_data is None:
-                extra_data = {}
-            
-            if not isinstance(timestamp, str):
-                try:
-                    timestamp = datetime.fromtimestamp(float(timestamp), timezone.utc).isoformat()
-                except Exception as e:
-                    return jsonify({'error': "Invalid timestamp format."}), 400
+
+            data_field = data.get('data') or {}
 
             if not sender or balance is None:
                 return jsonify({'error': "Missing 'sender' or 'balance' in request."}), 400
 
+            # Convert balance to Decimal
             try:
-                balance_decimal = Decimal(str(balance))
+                balance_decimal = Decimal(balance)
             except InvalidOperation:
                 return jsonify({'error': "Invalid balance format."}), 400
 
-            # Check if account already exists.
+            # Check if account already exists
             if self.account_manager.get_account_balance(sender) is not None:
                 return jsonify({'message': 'Account already exists.'}), 200
 
-            # Add the new account.
+            # Try adding account to ledger with the given balance
             success = self.account_manager.add_account(sender, balance_decimal)
-            if success:
-                # Call broadcast_new_account with the new transaction structure.
-                self.broadcast_new_account(
-                    sender=sender, 
-                    balance=balance_decimal,
-                    exclude_peer_url=None,
-                    public_key=public_key,
-                    signature=signature,
-                    timestamp=timestamp,
-                    tx_hash=tx_hash,
-                    type=type,
-                    nonce=nonce,
-                    fee=fee,
-                    data=extra_data  # pass the entire extra data object
-                )
-                return jsonify({'message': 'Account propagated and added successfully.'}), 201
+            if not success:
+                return jsonify({'error': 'Failed to add account to ledger.'}), 500
+
+            # Broadcast to local mempool + peers
+            local_hash = self.broadcast_new_account(
+                sender=sender,
+                balance=str(balance_decimal),
+                exclude_peer_url=None,
+                public_key=public_key,
+                signature=signature,
+                timestamp=timestamp,
+                tx_hash=tx_hash,  # user-provided hash, not used for verification
+                type=tx_type,
+                nonce=nonce,
+                fee=fee,
+                data=data_field
+            )
+
+            if local_hash:
+                return jsonify({
+                    'message': 'Account propagated and added successfully.',
+                    'local_hash': local_hash
+                }), 201
             else:
                 return jsonify({'error': 'Failed to propagate account.'}), 500
             
@@ -872,28 +982,41 @@ class NetworkManager:
         def retrieve_accounts():
             """
             Endpoint to retrieve all accounts, staking contracts, and node information.
+            Now includes each address' sOMC balance as 'sOMC'.
             """
             try:
-                # Pagination parameters
+                # 1) Handle pagination parameters
                 page = int(request.args.get('page', 1))
                 per_page = int(request.args.get('per_page', 100))
 
-                # Retrieve account balances
-                all_accounts = self.ledger.account_manager.get_all_accounts()
-                account_items = list(all_accounts.items())
+                # 2) Retrieve account balances from the ledger
+                all_accounts = self.ledger.account_manager.get_all_accounts()  # => dict: address -> account dict
+                account_items = list(all_accounts.items())  # => [ (address, account_dict), ... ]
+
                 start = (page - 1) * per_page
                 end = start + per_page
-                paginated_accounts = dict(account_items[start:end])
+                paginated_list = account_items[start:end]
 
-                # Retrieve staking contracts with pagination
-                all_staking = self.ledger.staking_manager.get_all_staking_agreements()
+                # convert back to a dict
+                paginated_accounts = dict(paginated_list)
+
+                # 3) For each address in our paginated accounts, fetch sOMC from staked_omc
+                for address, account_data in paginated_accounts.items():
+                    s_balance = self.ledger.staking_manager.staked_omc.get_balance(address)
+                    # If s_balance is None, it might not exist in staked_omc
+                    # We'll assume that means zero
+                    s_balance_str = str(s_balance) if s_balance is not None else "0"
+                    account_data["sOMC"] = s_balance_str
+
+                # 4) Retrieve staking contracts with pagination
+                all_staking = self.ledger.staking_manager.get_active_staking_agreements()
                 staking_paginated = all_staking[start:end]
 
-                # Retrieve nodes (assuming manageable size)
+                # 5) Retrieve node info
                 nodes = self.ledger.verifier.get_all_nodes()
 
                 response_data = {
-                    'data': paginated_accounts,
+                    'data': paginated_accounts,  # now each account has "sOMC": <string> included
                     'staking_accounts': staking_paginated,
                     'nodes': nodes,
                     'pagination': {
@@ -905,6 +1028,7 @@ class NetworkManager:
                 }
 
                 return jsonify(response_data), 200
+
             except Exception as e:
                 logger.exception("Exception occurred while retrieving accounts.")
                 return jsonify({"message": "Error retrieving accounts", "error": str(e)}), 500
@@ -927,7 +1051,7 @@ class NetworkManager:
                 if balance is not None:
                     response = {
                         'message': 'Account balance retrieved successfully',
-                        'balance': str(balance),
+                        'balance': balance,
                         'balance_float': float(balance) / (10 ** self.ledger.omc.decimals)
                     }
                     logger.debug(f"OMC balance for {address}: {balance}")
@@ -943,29 +1067,36 @@ class NetworkManager:
         @accounts_bp.route('/api/somc_balance', methods=['POST'])
         def get_somc_balance():
             """
-            Endpoint to check the balance of a wallet's sOMC.
+            Endpoint to check the sOMC balance of a given wallet address.
             Expects JSON: { "address": "0zUserAddress123" }
             """
             try:
                 data = request.get_json()
-                address = data.get('address')
-                if not address:
-                    return jsonify({"error": "Address not provided"}), 400
+                if not data or "address" not in data:
+                    return jsonify({"error": "No 'address' provided"}), 400
 
+                address = data["address"]
                 logger.debug(f"Fetching sOMC balance for address: {address}")
-                balance = self.ledger.staking_manager.staked_omc.get_balance(address)
 
-                if balance is not None:
-                    response = {
-                        'message': 'sOMC balance retrieved successfully',
-                        'balance': str(balance),
-                        'balance_float': float(balance) / (10 ** self.ledger.omc.decimals)
-                    }
-                    logger.debug(f"sOMC balance for {address}: {balance}")
-                    return jsonify(response), 200
-                else:
-                    logger.debug(f"Address {address} not found in sOMC balances.")
-                    return jsonify({"error": "Account not found"}), 404
+                # Use staked_omc's get_balance
+                s_balance = self.ledger.staking_manager.staked_omc.get_balance(address)
+                if s_balance is None:
+                    # If an address isn't found in staked_omc, we consider it zero
+                    s_balance = 0
+
+                # Return the integer-based sOMC plus a float version
+                s_balance_str = str(s_balance)
+                # If your staked_omc stores the raw integer scaled by decimals,
+                # you might want to convert it like so:
+                s_balance_float = float(s_balance) / (10 ** self.ledger.omc.decimals)
+
+                response = {
+                    'message': 'sOMC balance retrieved successfully',
+                    'address': address,
+                    'balance': s_balance_str,
+                    'balance_float': s_balance_float
+                }
+                return jsonify(response), 200
 
             except Exception as e:
                 logger.exception("Error in get_somc_balance endpoint.")
@@ -1310,7 +1441,7 @@ class NetworkManager:
 
                 # Convert amount to Decimal
                 try:
-                    amount_decimal = Decimal(str(amount))
+                    amount_decimal = Decimal(amount)
                 except InvalidOperation:
                     return jsonify({"error": "Invalid amount format."}), 400
 
@@ -1418,6 +1549,10 @@ class NetworkManager:
         app.register_blueprint(health_bp)
         app.register_blueprint(accounts_bp)
         app.register_blueprint(transfer_bp)
+        
+        # Initialize and register validator API for network joining
+        initialize_validator_api(self.ledger, self.omc, self.staking_manager, self.verifier, self.consensus_engine)
+        app.register_blueprint(validator_api)
 
     # ----------------------------------------------------------------
     #  START SERVER METHOD

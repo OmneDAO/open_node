@@ -3,29 +3,30 @@ import json
 import base64
 import hashlib
 from datetime import datetime, timezone, date
-from typing import Any
+from typing import Any, Dict
 from decimal import Decimal
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import ec  # for PEM keys
 
-# Use the ecdsa library for hex‐encoded keys
-from ecdsa import SigningKey, VerifyingKey, SECP256k1, BadSignatureError
+# Use the ecdsa library for hex-encoded keys
+from ecdsa import SigningKey, VerifyingKey, SECP256k1, BadSignatureError, util
 
-# Define a DecimalEncoder if needed for JSON serialization.
 class DecimalEncoder(json.JSONEncoder):
+    """
+    JSON encoder for converting Python Decimal objects to strings
+    so they can be properly handled in canonical JSON.
+    """
     def default(self, obj):
         if isinstance(obj, Decimal):
-            return format(obj, 'f')  # Force fixed-point format
+            return format(obj, 'f')  # fixed-point
         return super().default(obj)
 
 class CryptoUtils:
     """
     Provides cryptographic utilities for signing and verifying standard blockchain transactions.
-    (PEM keys are reserved for VRF functions.)
-    This module supports both PEM-formatted keys (via the cryptography library) and
-    hex-encoded keys (via the ecdsa package). Standard transaction signing uses hex keys,
-    while VRF-related functions can use PEM keys.
+    - For hex-encoded keys (secp256k1): uses the ecdsa library
+    - For PEM keys: uses cryptography.hazmat (reserved for VRF usage, etc.)
     """
     def __init__(self):
         self.logger = logging.getLogger('CryptoUtils')
@@ -38,12 +39,13 @@ class CryptoUtils:
 
     def load_private_key(self, private_key_str: str):
         """
-        Loads an EC private key from a string. If the string starts with a PEM header,
-        it is assumed to be PEM-formatted (for VRF functions); otherwise, it is treated as a hex-encoded key.
+        Loads an EC private key from a string. 
+        - If it starts with a PEM header => treat as PEM-formatted (cryptography).
+        - Otherwise => treat as hex-encoded (ecdsa).
         """
         try:
             if private_key_str.startswith("-----BEGIN"):
-                # PEM branch (cryptography library)
+                # PEM format
                 private_key = serialization.load_pem_private_key(
                     private_key_str.encode('utf-8'),
                     password=None,
@@ -54,7 +56,7 @@ class CryptoUtils:
                 self.logger.info("PEM-formatted private key loaded successfully.")
                 return private_key
             else:
-                # Hex-encoded branch (ecdsa package)
+                # Hex-encoded raw private key
                 private_key_bytes = bytes.fromhex(private_key_str)
                 signing_key = SigningKey.from_string(private_key_bytes, curve=SECP256k1)
                 self.logger.info("Hex-encoded private key loaded successfully.")
@@ -65,11 +67,13 @@ class CryptoUtils:
 
     def load_public_key(self, public_key_str: str):
         """
-        Loads an EC public key from a string. If the string starts with a PEM header,
-        it is assumed to be PEM-formatted (for VRF functions); otherwise, it is treated as a hex-encoded key.
+        Loads an EC public key from a string. 
+        - If it starts with PEM => treat as PEM (cryptography).
+        - Otherwise => treat as hex-encoded (ecdsa).
         """
         try:
             if public_key_str.startswith("-----BEGIN"):
+                # PEM format
                 public_key = serialization.load_pem_public_key(
                     public_key_str.encode('utf-8'),
                     backend=default_backend()
@@ -79,6 +83,7 @@ class CryptoUtils:
                 self.logger.info("PEM-formatted public key loaded successfully.")
                 return public_key
             else:
+                # Hex-encoded raw public key
                 public_key_bytes = bytes.fromhex(public_key_str)
                 verifying_key = VerifyingKey.from_string(public_key_bytes, curve=SECP256k1)
                 self.logger.info("Hex-encoded public key loaded successfully.")
@@ -89,12 +94,13 @@ class CryptoUtils:
 
     def get_public_key_pem(self, private_key_str: str) -> str:
         """
-        Extracts the public key from a given private key.
-        For PEM-formatted keys, returns the public key in PEM format.
-        For hex-encoded keys, returns the hex-encoded public key.
+        Extracts a public key from the given private key string.
+        - If PEM => returns PEM public key.
+        - If hex => returns hex public key.
         """
         try:
             key_obj = self.load_private_key(private_key_str)
+            # If this is a PEM key, it will have a `public_key()` method
             if hasattr(key_obj, 'public_key'):
                 public_key = key_obj.public_key()
                 public_pem = public_key.public_bytes(
@@ -105,6 +111,7 @@ class CryptoUtils:
                 self.logger.info("Public key extracted successfully from PEM key.")
                 return public_pem_str
             else:
+                # Must be a hex-based ecdsa key
                 verifying_key = key_obj.get_verifying_key()
                 public_key_hex = verifying_key.to_string().hex()
                 self.logger.info("Public key extracted successfully from hex key.")
@@ -112,112 +119,137 @@ class CryptoUtils:
         except Exception as e:
             self.logger.error(f"Failed to extract public key: {e}")
             raise
-
-    def sign_message(self, private_key: str, hash_hex: str) -> str:
+    
+    def get_address_from_private_key(self, private_key_str: str) -> str:
         """
-        Signs the provided SHA‑256 hash using the given private key.
-        
-        :param private_key: The private key as a string (PEM or hex).
-        :param hash_hex: The SHA‑256 hash (hex string) of the canonical payload.
-        :return: Base64-encoded signature.
+        Derives a blockchain address from the given private key.
+        This is done by extracting the public key, computing its SHA-256 hash,
+        and taking the first 40 hexadecimal characters with a prefix.
+            
+        :param private_key_str: The private key in hex or PEM format.
+        :return: The derived address as a string.
         """
         try:
-            key_obj = self.load_private_key(private_key)
-            # Convert the hash to bytes.
-            hash_bytes = bytes.fromhex(hash_hex)
-            
-            # Branch based on key type.
-            if hasattr(key_obj, 'private_numbers'):
-                # key_obj is a cryptography key.
-                signature = key_obj.sign(hash_bytes, ec.ECDSA(hashes.SHA256()))
-            else:
-                # key_obj is an ecdsa.SigningKey (hex-encoded).
-                signature = key_obj.sign(hash_bytes, hashfunc=hashlib.sha256)
-            signature_b64 = base64.b64encode(signature).decode('utf-8')
-            self.logger.info("Message signed successfully.")
-            return signature_b64
+            # Get the public key using the existing method.
+            public_key_str = self.get_public_key_pem(private_key_str)
+                
+            # Compute a SHA-256 hash of the public key.
+            public_key_hash = hashlib.sha256(public_key_str.encode('utf-8')).hexdigest()
+                
+            # Derive the address by taking the first 40 hex digits and prefixing with "0z"
+            address = "0z" + public_key_hash[:40]
+            self.logger.info(f"Derived address: {address}")
+            return address
         except Exception as e:
-            self.logger.error(f"Failed to sign message: {e}")
+            self.logger.error(f"Failed to derive address from private key: {e}")
+            raise
+
+    def sign_transaction(self, private_key_hex: str, transaction_dict: Dict) -> str:
+        """
+        (Option A) Let the ecdsa library do the hashing. 
+        Steps:
+          1) Remove 'signature'/'hash' from the transaction.
+          2) JSON-serialize with (sort_keys=True, separators=(',',':'), optional DecimalEncoder).
+          3) Pass the resulting bytes to signing_key.sign(..., hashfunc=hashlib.sha256),
+             so ecdsa does a single SHA-256 internally.
+          4) Convert DER signature to base64 string.
+        """
+        try:
+            # 1) Remove 'signature'/'hash'
+            tx_copy = dict(transaction_dict)
+            tx_copy.pop('signature', None)
+            tx_copy.pop('hash', None)
+
+            # 2) Build canonical JSON
+            canonical_str = json.dumps(
+                tx_copy,
+                sort_keys=True,
+                separators=(',', ':'),
+                cls=DecimalEncoder
+            )
+            logging.info(f"[sign_transaction] canonical_str => {canonical_str}")
+
+            # Raw message (not hashed here, ecdsa will do the hashing)
+            payload_bytes = canonical_str.encode('utf-8')
+
+            # 3) sign using ecdsa
+            private_key_bytes = bytes.fromhex(private_key_hex)
+            signing_key = SigningKey.from_string(private_key_bytes, curve=SECP256k1)
+            # Pass the raw payload + specify hashfunc => ecdsa does exactly one sha256
+            signature_der = signing_key.sign(
+                payload_bytes,
+                hashfunc=hashlib.sha256,
+                sigencode=util.sigencode_der
+            )
+
+            signature_b64 = base64.b64encode(signature_der).decode('utf-8')
+            self.logger.info("Transaction signed successfully.")
+            return signature_b64
+
+        except Exception as e:
+            self.logger.error(f"Failed to sign transaction: {e}")
             raise
 
     @staticmethod
-    def verify_signature(public_key_str: str, transaction: dict, signature_base64: str) -> bool:
+    def verify_transaction(pub_key_hex: str, transaction: Dict[str, Any], signature_base64: str) -> bool:
         """
-        Verifies a signature against the transaction's canonical payload.
-        
-        This function expects that the transaction includes a required 'data' field (even if empty)
-        and a 'confirmations' field. It then rebuilds the canonical payload using all keys except 'signature' and 'hash',
-        using sorted keys and compact separators. The entire payload—including the 'data' field—is used for hashing.
-        It then computes the SHA‑256 hash and compares it to the stored 'hash' field, and finally
-        verifies that the signature (decoded from base64) is valid for that hash using the provided hex‑encoded public key.
-        
-        :param public_key_str: Hex-encoded public key.
-        :param transaction: Transaction dictionary (must include a 'hash' key and a 'data' key, even if empty).
-        :param signature_base64: Base64-encoded signature.
-        :return: True if the signature is valid; False otherwise.
+        (Option B) We do the hashing manually, then call verify_digest().
+        Steps:
+        1) Remove 'signature'/'hash' from transaction.
+        2) Canonical-serialize the remaining fields => JSON (sort_keys=True, no extra spaces).
+        3) Compute SHA-256 digest of that string.
+        4) Decode the signature from base64 => DER, then use verify_digest(...).
+            This ensures we do NOT re-hash the digest internally.
         """
         try:
-            # If transaction is a string, parse it.
-            if isinstance(transaction, str):
-                transaction = json.loads(transaction)
-            
-            # Ensure 'data' is present (if not, default to {}).
-            if 'data' not in transaction:
-                transaction['data'] = {}
+            # 1) Convert hex-encoded pubkey => VerifyingKey
+            pub_key_bytes = bytes.fromhex(pub_key_hex)
+            vk = VerifyingKey.from_string(pub_key_bytes, curve=SECP256k1)
 
-            # (Optionally, you may also require that 'confirmations' is present.)
-            if 'confirmations' not in transaction:
-                transaction['confirmations'] = 0
+            # 2) Make a copy to avoid mutating the original
+            tx_copy = dict(transaction)
+            tx_copy.pop('signature', None)
+            tx_copy.pop('hash', None)
 
-            # Build the canonical payload including all keys except 'signature' and 'hash'.
-            canonical_payload = json.dumps(
-                {k: transaction[k] for k in sorted(transaction) if k not in ['signature', 'hash']},
+            # Canonical JSON
+            transaction_str = json.dumps(
+                tx_copy,
                 sort_keys=True,
-                cls=DecimalEncoder,
-                separators=(',', ':')
+                separators=(',', ':'),
+                cls=DecimalEncoder
             )
-            logging.info(f"Canonical payload for verification: {canonical_payload}")
-            logging.info(f"Canonical payload repr: {repr(canonical_payload)}")
-            
-            # Compute the SHA‑256 hash of the canonical payload.
-            computed_hash = hashlib.sha256(canonical_payload.encode('utf-8')).hexdigest()
-            
-            # Compare the recomputed hash with the stored hash.
-            stored_hash = transaction.get('hash')
-            if stored_hash != computed_hash:
-                logging.error("Recomputed hash does not match the stored transaction hash.")
-                return False
-            
-            # Create verifying key from the provided public key.
-            public_key_bytes = bytes.fromhex(public_key_str)
-            verifying_key = VerifyingKey.from_string(public_key_bytes, curve=SECP256k1)
-            
-            # Decode the signature from base64.
-            signature_bytes = base64.b64decode(signature_base64)
-            
-            # The message hash is the computed hash converted from hex to bytes.
-            message_hash_bytes = bytes.fromhex(computed_hash)
-            
-            # Verify the signature.
-            verifying_key.verify(signature_bytes, message_hash_bytes, hashfunc=hashlib.sha256)
-            
-            logging.info("Signature verification successful.")
+            logging.info(f"[verify_transaction] canonical_str => {transaction_str}")
+
+            # 3) Manual SHA-256 => 32-byte digest
+            digest = hashlib.sha256(transaction_str.encode('utf-8')).digest()
+
+            # 4) decode signature from base64 => DER => verify the *digest*
+            signature_der = base64.b64decode(signature_base64)
+            vk.verify_digest(
+                signature_der,
+                digest,
+                sigdecode=util.sigdecode_der  # no hashfunc => no double-hash
+            )
             return True
         except BadSignatureError:
-            logging.warning("Invalid signature.")
             return False
-        except Exception as e:
-            logging.error(f"Error during signature verification: {e}")
+        except Exception:
             return False
 
     def calculate_sha256_hash(self, transaction: dict) -> str:
         """
-        Calculates the SHA-256 hash of a transaction (excluding its 'hash' field).
-        
-        :param transaction: The transaction dictionary.
-        :return: The SHA-256 hash as a hexadecimal string.
+        Utility to produce a local 'transaction hash' if needed.
+        Excludes 'signature'/'hash' fields, uses the same canonical JSON approach
+        but returns hex digest. This is just for reference or to store as a TX ID.
         """
-        transaction_copy = transaction.copy()
-        transaction_copy.pop('hash', None)
-        transaction_str = json.dumps(transaction_copy, sort_keys=True, cls=DecimalEncoder)
+        tx_copy = dict(transaction)
+        tx_copy.pop('signature', None)
+        tx_copy.pop('hash', None)
+
+        transaction_str = json.dumps(
+            tx_copy,
+            sort_keys=True,
+            separators=(',', ':'),
+            cls=DecimalEncoder
+        )
         return hashlib.sha256(transaction_str.encode('utf-8')).hexdigest()

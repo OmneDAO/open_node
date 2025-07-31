@@ -169,7 +169,7 @@ class Block:
             proof_of_effort=data.get("proof_of_effort")
         )
 
-    def verify_signatures(self, crypto_utils, account_manager) -> bool:
+    def verify_messages(self, crypto_utils, account_manager) -> bool:
         """
         Verifies all signatures in the block.
 
@@ -192,7 +192,7 @@ class Block:
                     return False
 
                 message = self.hash  # Typically, the block's hash is signed
-                if not crypto_utils.verify_signature(public_key, message, signature):
+                if not crypto_utils.verify_transaction(public_key, message, signature):
                     logger.error(f"Signature verification failed for validator: {validator_address}")
                     return False
 
@@ -255,7 +255,7 @@ class Block:
             logger.debug("Block hash validated successfully.")
 
             # Verify signatures
-            if not self.verify_signatures(ledger.crypto_utils, ledger.account_manager):
+            if not self.verify_transactions(ledger.crypto_utils, ledger.account_manager):
                 logger.error("Block signatures are invalid.")
                 return False
             logger.debug("Block signatures validated successfully.")

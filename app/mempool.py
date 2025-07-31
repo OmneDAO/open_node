@@ -1,454 +1,426 @@
-# mempool.py
-
 import logging
 import threading
-from typing import List, Dict, Optional
-from decimal import Decimal, InvalidOperation
-import hashlib
-import json
-import heapq
 import time
-from dateutil import parser  # Ensure dateutil is installed
+import heapq
+from typing import List, Dict, Optional, Tuple
+from decimal import Decimal
+from dateutil import parser  # Ensure python-dateutil is installed
 
 from crypto_utils import CryptoUtils, DecimalEncoder
 from dynamic_fee_calculator import DynamicFeeCalculator
-from consensus_engine import ConsensusEngine  # For consensus-specific validations
+from consensus_engine import ConsensusEngine
 
 class Mempool:
     """
     Manages pending transactions awaiting inclusion in blocks.
-    Ensures transactions are valid by verifying sender's balance, nonce, signature, and consensus-specific criteria.
-    Includes performance optimizations like dynamic sizing, fee prioritization, and purging stale transactions.
+    Validates fields, ensures nonce/balance correctness, and integrates with
+    the ledger for final checks. Supports dynamic sizing and stale‐transaction purging.
     """
 
     def __init__(
         self,
         crypto_utils: CryptoUtils,
         fee_calculator: DynamicFeeCalculator,
-        max_size: int = 1000,  # Initial max size
-        min_size: int = 500,    # Minimum mempool size to prevent too small pools
-        adjustment_interval: int = 60,  # Seconds between size adjustments
-        high_activity_threshold: int = 100,  # Transactions per adjustment interval to consider high activity
-        low_activity_threshold: int = 10,     # Transactions per adjustment interval to consider low activity
-        stale_time: int = 3600                # Seconds after which transactions are considered stale
+        max_size: int = 1000,
+        min_size: int = 500,
+        adjustment_interval: int = 60,
+        high_activity_threshold: int = 100,
+        low_activity_threshold: int = 10,
+        stale_time: int = 3600
     ):
         """
-        :param crypto_utils: Instance of CryptoUtils for cryptographic operations.
-        :param fee_calculator: Instance of DynamicFeeCalculator for fee calculations.
-        :param max_size: Initial maximum number of transactions the mempool can hold.
-        :param min_size: Minimum mempool size to prevent it from becoming too small.
-        :param adjustment_interval: Time in seconds between dynamic size adjustments.
-        :param high_activity_threshold: Transaction count to trigger mempool size increase.
-        :param low_activity_threshold: Transaction count to trigger mempool size decrease.
-        :param stale_time: Time in seconds after which transactions are considered stale.
+        :param crypto_utils: A CryptoUtils instance for signature hashing/verifications.
+        :param fee_calculator: DynamicFeeCalculator for applying fee rules if needed.
+        :param max_size: Initial maximum capacity of mempool.
+        :param min_size: Minimum mempool size to prevent it from shrinking too far.
+        :param adjustment_interval: Frequency (seconds) of mempool size self‐adjustment.
+        :param high_activity_threshold: If average txs exceed this, the mempool grows.
+        :param low_activity_threshold: If average txs dip below, the mempool shrinks.
+        :param stale_time: Transactions older than this (seconds) are purged periodically.
         """
         self.transactions: List[Dict] = []
         self.lock = threading.Lock()
         self.crypto_utils = crypto_utils
         self.fee_calculator = fee_calculator
 
-        # ConsensusEngine reference, to be set via setter to avoid circular import
+        # References to be set externally to avoid circular imports
         self.consensus_engine: Optional[ConsensusEngine] = None
-
-        # Ledger reference, to be set via setter to avoid circular import
         self.ledger: Optional['Ledger'] = None
 
-        # Dynamic sizing parameters
+        # Mempool dynamic sizing
         self.max_size = max_size
         self.min_size = min_size
         self.adjustment_interval = adjustment_interval
         self.high_activity_threshold = high_activity_threshold
         self.low_activity_threshold = low_activity_threshold
 
-        # For tracking transaction counts in each interval
+        # Transaction counting for dynamic resizing
         self.transaction_counts: List[int] = []
         self.current_interval_count = 0
 
-        # For prioritizing transactions by fee (max-heap)
-        self.fee_heap: List[tuple] = []  # List of tuples (-fee, timestamp, transaction)
+        # Priority queue (max‐heap) for fees:  ( -fee_value, tx_timestamp, tx_dict )
+        self.fee_heap: List[Tuple[Decimal, str, Dict]] = []
 
-        # Start the dynamic sizing thread
-        self.size_adjustment_thread = threading.Thread(target=self._dynamic_size_adjustment_routine, daemon=True)
+        # Start background threads for dynamic resizing and stale purge
+        self.size_adjustment_thread = threading.Thread(
+            target=self._dynamic_size_adjustment_routine, daemon=True
+        )
         self.size_adjustment_thread.start()
 
-        # Start the stale transaction purging thread
-        self.purging_thread = threading.Thread(target=self._purge_stale_transactions_routine, args=(stale_time,), daemon=True)
+        self.purging_thread = threading.Thread(
+            target=self._purge_stale_transactions_routine, args=(stale_time,), daemon=True
+        )
         self.purging_thread.start()
 
-        # Initialize logger
+        # Logger
         self.logger = logging.getLogger('Mempool')
         self.logger.info(f"[Mempool] Initialized with max_size={self.max_size}, min_size={self.min_size}.")
 
     def set_consensus_engine(self, consensus_engine: ConsensusEngine):
-        """
-        Sets the ConsensusEngine instance for consensus-specific validations.
-        """
+        """Sets the reference to the ConsensusEngine (for advanced checks if needed)."""
         self.consensus_engine = consensus_engine
         self.logger.info("[Mempool] ConsensusEngine has been set.")
 
     def set_ledger(self, ledger: 'Ledger'):
-        """
-        Sets the Ledger instance to allow interaction with the blockchain state.
-        """
+        """Sets the reference to the Ledger (for nonce/balance checks)."""
         self.ledger = ledger
         self.logger.info("[Mempool] Ledger has been set.")
 
-    def compute_tx_hash(self, transaction: Dict) -> str:
-        # Core keys always included.
-        canonical_keys = ["sender", "type", "nonce", "timestamp", "fee", "public_key"]
-        
-        # For the transaction amount, include 'amount' if it exists; otherwise, include 'balance'
-        if "amount" in transaction:
-            canonical_keys.append("amount")
-        elif "balance" in transaction:
-            canonical_keys.append("balance")
-        
-        # If there is a metadata object, include its keys.
-        metadata = transaction.get("metadata", {})
-        # For future-proofing, you can merge the metadata into the canonical payload.
-        for key in metadata:
-            canonical_keys.append(key)
-        
-        # Remove duplicates (if any) and sort the final list.
-        canonical_keys = sorted(set(canonical_keys))
-        
-        # Build the canonical dictionary. We also include any additional top-level keys if needed.
-        canonical_data = { key: str(transaction[key]) for key in canonical_keys if key in transaction }
-        # Merge metadata into canonical_data (if keys overlap, you could decide whether metadata overrides or not)
-        for key, value in metadata.items():
-            canonical_data[key] = str(value)
-        
-        # Serialize with compact separators for consistency.
-        canonical_string = json.dumps(canonical_data, sort_keys=True, separators=(',', ':'))
-        return hashlib.sha256(canonical_string.encode('utf-8')).hexdigest()
+    def add_transaction(self, transaction: Dict) -> Tuple[bool, Optional[str]]:
+        """
+        Validates the transaction (fields, signature, nonce, balance) and
+        adds it to the mempool if valid. Returns (True, tx_hash) on success,
+        or (False, None) on failure.
+        """
+        # Basic classification by 'type'
+        required_fields_by_type = {
+            "account_creation": ["sender", "balance", "nonce", "public_key", "signature",
+                                 "timestamp", "type", "data"],
+            "deploy_contract": ["sender", "compiled_code", "abi", "public_key", "signature",
+                                "timestamp", "type"],
+            "execute_contract": ["sender", "contract_id", "function_name", "args", "public_key",
+                                 "nonce", "signature", "timestamp", "type", "data"],
+            "transfer": ["sender", "receiver", "amount", "nonce", "timestamp", "fee",
+                         "public_key", "signature", "type", "data"],
+        }
+        tx_type = transaction.get('type')
+        if not tx_type:
+            self.logger.error("[Mempool] Transaction missing 'type' field.")
+            return (False, None)
 
-    def add_transaction(self, transaction: Dict) -> bool:
-        """
-        Adds a transaction to the mempool after validating balance, nonce, signature,
-        and consensus-specific criteria.
-        """
-        sender = transaction.get('sender')
-        receiver = transaction.get('receiver')
-        amount = transaction.get('amount')
-        balance = transaction.get('balance')
-        fee = transaction.get('fee', '0')
-        nonce = transaction.get('nonce')
-        public_key = transaction.get('public_key')
-        signature = transaction.get('signature')
-        timestamp = transaction.get('timestamp')
-        tx_type = transaction.get('type', '')
-        
-        # For "account_creation" transactions, we do not use 'receiver' or 'amount'
-        if tx_type == 'account_creation':
-            required_fields = [sender, balance, nonce, public_key, signature]
-        else:
-            required_fields = [sender, receiver, amount, public_key, nonce, signature]
-        
-        if any(field is None for field in required_fields):
-            self.logger.error("[Mempool] Transaction is missing required fields (one is None).")
-            return False
-        
-        try:
-            if tx_type == 'account_creation':
-                amount = Decimal(str(balance))
-            else:
-                amount = Decimal(str(amount))
-            fee = Decimal(str(fee))
-            nonce = int(nonce)
-        except (ValueError, InvalidOperation) as e:
-            self.logger.error(f"[Mempool] Invalid transaction amount or nonce: {e}")
-            return False
-        
-        # Ensure the transaction includes a 'data' field (required)
-        if 'data' not in transaction:
-            transaction['data'] = {}
-        
-        # Optionally, ensure that 'confirmations' is set (default to 0).
-        if 'confirmations' not in transaction:
-            transaction['confirmations'] = 0
-        
-        # Compute transaction hash using our canonicalization method.
-        tx_hash = self.compute_tx_hash(transaction)
-        transaction['hash'] = tx_hash
-        
-        transaction['timestamp'] = timestamp  # preserve incoming timestamp
-        
-        # Build the canonical payload for signature verification.
-        canonical_payload = json.dumps(
-            {k: transaction[k] for k in sorted(transaction) if k not in ['signature', 'hash']},
-            sort_keys=True,
-            cls=DecimalEncoder,
-            separators=(',', ':')
+        required_fields = required_fields_by_type.get(tx_type)
+        if required_fields is None:
+            self.logger.error(f"[Mempool] Unknown transaction type: {tx_type}")
+            return (False, None)
+
+        # Check required fields
+        for field in required_fields:
+            if transaction.get(field) is None:
+                self.logger.error(f"[Mempool] Transaction missing required field: {field}")
+                return (False, None)
+
+        # Guarantee 'data' and 'confirmations' exist
+        transaction.setdefault('data', {})
+        transaction.setdefault('confirmations', "0")
+
+        # Compute & store transaction hash
+        tx_hash = self.crypto_utils.calculate_sha256_hash(transaction)
+        # If not already present, store the numeric epoch time for stale checks
+        # if 'timestamp_unix' not in transaction:
+        #     transaction['timestamp_unix'] = time.time()
+
+        self.logger.info(f"[Mempool] Computed local transaction hash: {tx_hash}")
+
+        # Verify signature
+        is_valid_sig = self.crypto_utils.verify_transaction(
+            transaction.get('public_key'), transaction, transaction.get('signature')
         )
-        
-        # Verify the signature using the canonical payload.
-        if not self.crypto_utils.verify_signature(
-                transaction.get('public_key'), canonical_payload, signature):
-            self.logger.warning(f"[Mempool] Transaction {tx_hash} from {sender} rejected due to invalid signature.")
-            return False
-        
-        # (Optional: consensus-specific validation here.)
-        
+        if not is_valid_sig:
+            self.logger.warning(
+                f"[Mempool] Transaction {tx_hash} from sender={transaction.get('sender')} "
+                f"rejected due to invalid signature."
+            )
+            return (False, None)
+
         with self.lock:
             if not self.ledger:
-                self.logger.error("[Mempool] Ledger not set. Cannot validate transaction against ledger state.")
-                return False
-            
-            last_confirmed_nonce = self.ledger.account_manager.get_last_nonce(sender)
-            last_mempool_nonce = self._get_last_mempool_nonce(sender)
-            expected_nonce = last_mempool_nonce + 1
-            if nonce != expected_nonce:
+                self.logger.error("[Mempool] Ledger not set, cannot validate nonce/balance.")
+                return (False, None)
+
+            # Check nonce in ledger + mempool
+            last_confirmed_nonce = self.ledger.account_manager.get_last_nonce(transaction['sender'])
+            mempool_nonce = self._get_last_mempool_nonce(transaction['sender'])
+            expected_nonce = mempool_nonce + 1
+
+            if str(transaction['nonce']) != str(expected_nonce):
                 self.logger.warning(
-                    f"[Mempool] Transaction {tx_hash} from {sender} has invalid nonce. Expected: {expected_nonce}, Got: {nonce}."
+                    f"[Mempool] Transaction {tx_hash} has invalid nonce. "
+                    f"Expected {expected_nonce}, got {transaction['nonce']}."
                 )
-                return False
-            
-            balance_on_ledger = self.ledger.account_manager.get_account_balance(sender)
-            if balance_on_ledger < (amount + fee):
+                return (False, None)
+
+            # Check balance
+            ledger_balance = self.ledger.account_manager.get_account_balance(transaction['sender'])
+            try:
+                if tx_type == "account_creation":
+                    amt = Decimal(transaction.get('balance', "0"))
+                else:
+                    amt = Decimal(transaction.get('amount', "0"))
+                fee = Decimal(transaction.get('fee', "0"))
+            except Exception as exc:
+                self.logger.error(f"[Mempool] Failed converting amounts to Decimal: {exc}")
+                return (False, None)
+
+            if ledger_balance < (amt + fee):
                 self.logger.warning(
-                    f"[Mempool] Transaction {tx_hash} from {sender} rejected due to insufficient balance. "
-                    f"Balance: {balance_on_ledger}, Required: {amount + fee}."
+                    f"[Mempool] Transaction {tx_hash} from {transaction['sender']} "
+                    f"rejected (Insufficient balance: {ledger_balance} < {amt+fee})."
                 )
-                return False
-            
+                return (False, None)
+
+            # Check mempool capacity
             if len(self.transactions) >= self.max_size:
                 if self.fee_heap:
-                    lowest_fee_tx = self.fee_heap[0][2]
-                    lowest_fee = self.fee_heap[0][0]
-                    if fee > (-lowest_fee):
-                        _, _, tx_to_remove = heapq.heappop(self.fee_heap)
-                        self.transactions.remove(tx_to_remove)
-                        self.logger.info(f"[Mempool] Removed transaction {tx_to_remove['hash']} to make space for higher fee transaction.")
+                    # Compare fees
+                    lowest_fee_item = self.fee_heap[0]  # ( -fee_val, timestamp, tx_dict )
+                    lowest_fee_val = -lowest_fee_item[0]
+                    if fee > lowest_fee_val:
+                        # remove the low‐fee tx
+                        _, _, old_tx = heapq.heappop(self.fee_heap)
+                        self.transactions.remove(old_tx)
+                        self.logger.info(
+                            f"[Mempool] Removed transaction {old_tx.get('hash')} to fit higher fee TX {tx_hash}."
+                        )
                     else:
-                        self.logger.warning(f"[Mempool] Mempool full. Transaction {tx_hash} with fee {fee} rejected.")
-                        return False
+                        self.logger.warning(f"[Mempool] Full. TX {tx_hash} with fee={fee} is rejected.")
+                        return (False, None)
                 else:
-                    self.logger.warning(f"[Mempool] Mempool full. Transaction {tx_hash} rejected.")
-                    return False
-            
+                    self.logger.warning(f"[Mempool] Full, no fee_heap. TX {tx_hash} is rejected.")
+                    return (False, None)
+
+            # All checks pass -> add transaction
+            transaction['hash'] = tx_hash
             self.transactions.append(transaction)
             heapq.heappush(self.fee_heap, (-fee, transaction['timestamp'], transaction))
             self.current_interval_count += 1
-            self.logger.info(f"[Mempool] Transaction {tx_hash} from {sender} added to mempool with fee {fee}.")
-            return True
-                        
+            self.logger.info(f"[Mempool] Transaction {tx_hash} successfully added.")
+        return (True, tx_hash)
+
     def _get_last_mempool_nonce(self, sender: str) -> int:
         """
-        Retrieves the last nonce for a sender within the mempool.
-        If the sender is involved in a staking contract, checks the last staking transaction nonce.
+        Checks all mempool transactions for 'sender' to find the highest nonce used so far.
+        Then compares with ledger's last confirmed nonce, returning the max.
         """
-        mempool_transactions = [tx for tx in self.transactions if tx['sender'] == sender]
-
-        # Find the last confirmed nonce from the ledger
-        last_confirmed_nonce = self.ledger.account_manager.get_last_nonce(sender)
-
-        # If there are staking transactions, check their last nonce
-        staking_transactions = [tx for tx in mempool_transactions if tx.get('type') == 'staking']
-        
-        if staking_transactions:
-            # Find highest nonce in staking transactions
-            return max(tx['nonce'] for tx in staking_transactions)
-
-        # Otherwise, return the highest nonce in normal transactions
-        return max([tx['nonce'] for tx in mempool_transactions], default=last_confirmed_nonce)
+        mempool_txs = [tx for tx in self.transactions if tx.get('sender') == sender]
+        ledger_nonce = self.ledger.account_manager.get_last_nonce(sender)
+        if not mempool_txs:
+            return ledger_nonce
+        highest_mempool_nonce = max(int(tx.get('nonce', ledger_nonce)) for tx in mempool_txs)
+        return max(ledger_nonce, highest_mempool_nonce)
 
     def remove_transaction(self, tx_hash: str) -> bool:
         """
-        Removes a transaction from the mempool based on its hash.
-
-        :param tx_hash: The hash of the transaction to remove.
-        :return: True if transaction was found and removed, False otherwise.
+        Removes a single transaction matching tx_hash from the mempool and fee_heap.
         """
         with self.lock:
             for tx in self.transactions:
-                if tx['hash'] == tx_hash:
+                if tx.get('hash') == tx_hash:
                     self.transactions.remove(tx)
-                    # Remove from fee heap
-                    for idx, item in enumerate(self.fee_heap):
-                        if item[2]['hash'] == tx_hash:
-                            del self.fee_heap[idx]
-                            heapq.heapify(self.fee_heap)
-                            break
-                    self.logger.info(f"[Mempool] Transaction {tx_hash} removed from mempool.")
+                    # Also remove from fee_heap
+                    self.fee_heap = [
+                        item for item in self.fee_heap if item[2].get('hash') != tx_hash
+                    ]
+                    heapq.heapify(self.fee_heap)
+                    self.logger.info(f"[Mempool] Transaction {tx_hash} removed.")
                     return True
-        self.logger.warning(f"[Mempool] Transaction {tx_hash} not found in mempool.")
+        self.logger.warning(f"[Mempool] Transaction {tx_hash} not found for removal.")
         return False
+
+    def remove_transactions(self, tx_list: List[Dict]) -> None:
+        """
+        Removes multiple transactions, typically after they are included in a block.
+        Matching is by 'hash' to ensure exact removal.
+        """
+        with self.lock:
+            for tx in tx_list:
+                h = tx.get('hash')
+                if h:
+                    self.remove_transaction(h)
 
     def get_transactions(self) -> List[Dict]:
         """
-        Returns a list of all transactions in the mempool, prioritized by fee.
+        Returns all transactions in the mempool, sorted by descending fee.
         """
         with self.lock:
-            # Return transactions sorted by fee in descending order
-            return sorted(self.transactions, key=lambda tx: Decimal(tx['fee']), reverse=True)
+            return sorted(self.transactions, key=lambda tx: Decimal(tx.get('fee', '0')), reverse=True)
+
+    def get_transactions_for_block(self, max_block_txs: int = 500, max_block_size: int = 1_000_000) -> List[Dict]:
+        """
+        Retrieves up to `max_block_txs` transactions from the mempool, sorted by highest fee.
+        If `size` is tracked per TX, skip any that would exceed `max_block_size`.
+        """
+        with self.lock:
+            sorted_by_fee = self.get_transactions()  # already sorted desc by fee
+            chosen = []
+            total_size = 0
+            for tx in sorted_by_fee:
+                tx_size = tx.get('size', 250)  # default or actual size
+                if len(chosen) < max_block_txs and (total_size + tx_size) <= max_block_size:
+                    chosen.append(tx)
+                    total_size += tx_size
+                else:
+                    break
+            return chosen
 
     def drain_verified_transactions(self) -> List[Dict]:
         """
-        Drains and returns all verified transactions from the mempool, prioritized by fee.
-
-        :return: List of drained transactions.
+        Empties the mempool, returning all transactions in descending fee order.
+        Normally used in dev/test scenarios.
         """
         with self.lock:
-            prioritized_transactions = self.get_transactions()
+            txs = self.get_transactions()  # sorted desc
             self.transactions.clear()
             self.fee_heap.clear()
-            self.current_interval_count += len(prioritized_transactions)
-            self.logger.info(f"[Mempool] Drained {len(prioritized_transactions)} transactions from mempool.")
-            return prioritized_transactions
+            self.current_interval_count += len(txs)
+            self.logger.info(f"[Mempool] Drained {len(txs)} transactions.")
+            return txs
 
     def return_transactions(self, transactions: List[Dict]) -> None:
         """
-        Returns transactions to the mempool, e.g., if block creation failed.
-
-        :param transactions: List of transactions to return.
+        Re‐adds transactions to the mempool if block creation fails. Typically verifies
+        signature, ledger state (balance/nonce) again, and discards if not valid anymore.
         """
         with self.lock:
             for tx in transactions:
-                tx_hash = tx.get('hash')
-                sender = tx.get('sender')
-                receiver = tx.get('receiver')
-                amount = Decimal(tx.get('amount', '0'))
-                fee = Decimal(tx.get('fee', '0'))
-                nonce = int(tx.get('nonce', '0'))
-
-                # Check for duplicates
-                if any(existing_tx['hash'] == tx_hash for existing_tx in self.transactions):
-                    self.logger.warning(f"[Mempool] Duplicate transaction {tx_hash} detected when returning to mempool. Skipping.")
+                h = tx.get('hash')
+                if not h:
+                    self.logger.warning("[Mempool] Transaction missing 'hash' field on return. Skipped.")
+                    continue
+                # Check duplicates
+                if any(existing.get('hash') == h for existing in self.transactions):
+                    self.logger.warning(f"[Mempool] Duplicate TX {h} detected. Skipped re‐add.")
                     continue
 
-                # Verify sender's balance again against the ledger's current state
                 if not self.ledger:
-                    self.logger.error("[Mempool] Ledger not set. Cannot verify balance for returning transactions.")
+                    self.logger.error("[Mempool] Ledger not set; cannot re‐verify transaction.")
                     continue
 
-                sender_balance = self.ledger.account_manager.get_account_balance(sender)
-                if sender_balance < (amount + fee):
-                    self.logger.warning(f"[Mempool] Cannot return transaction {tx_hash} due to insufficient balance for sender {sender}. Required: {amount + fee}, Available: {sender_balance}.")
+                # Quick balance check
+                sender_balance = self.ledger.account_manager.get_account_balance(tx.get('sender'))
+                if tx.get('type') == 'account_creation':
+                    amt = Decimal(tx.get('balance', '0'))
+                else:
+                    amt = Decimal(tx.get('amount', '0'))
+                fee_val = Decimal(tx.get('fee', '0'))
+                if sender_balance < (amt + fee_val):
+                    self.logger.warning(f"[Mempool] TX {h} re‐add failed (insufficient balance).")
                     continue
 
-                # Verify signature again
-                if not self.crypto_utils.verify_signature(tx):
-                    self.logger.warning(f"[Mempool] Invalid signature for transaction {tx_hash} when returning to mempool.")
+                # Re‐verify signature
+                if not self.crypto_utils.verify_transaction(tx.get('public_key'), tx, tx.get('signature')):
+                    self.logger.warning(f"[Mempool] Invalid signature on re‐add for TX {h}.")
                     continue
 
-                # Verify that fee meets the minimum required
-                try:
-                    min_fee = self.fee_calculator.calculate_fee(transaction_size=tx.get('size', 250))  # Assuming transaction has a 'size' field
-                except Exception as e:
-                    self.logger.error(f"[Mempool] Error calculating minimum fee for transaction {tx_hash}: {e}")
+                # If you'd like, recheck consensus_engine validations
+                # (Not mandatory if ledger checks are enough.)
+                if self.consensus_engine and not self.consensus_engine.validate_transaction(tx):
+                    self.logger.warning(f"[Mempool] TX {h} rejected by consensus engine on re‐add.")
                     continue
 
-                if fee < min_fee:
-                    self.logger.warning(f"[Mempool] Fee {fee} below minimum required {min_fee} for transaction {tx_hash} when returning to mempool.")
-                    continue
-
-                # Consensus-specific validation
-                if not self.consensus_engine.validate_transaction(tx):
-                    self.logger.warning(f"[Mempool] Transaction {tx_hash} rejected by consensus engine when returning to mempool.")
-                    continue
-
-                # Add the transaction back to mempool
+                # Passed all => push
                 self.transactions.append(tx)
-                heapq.heappush(self.fee_heap, (-fee, tx['timestamp'], tx))
-                self.logger.debug(f"[Mempool] Transaction {tx_hash} returned to mempool.")
+                heapq.heappush(self.fee_heap, (-fee_val, tx.get('timestamp', ''), tx))
+                self.logger.debug(f"[Mempool] TX {h} re‐added to mempool.")
+
+    def has_transactions(self) -> bool:
+        with self.lock:
+            return bool(self.transactions)
+
+    def get_transaction_count(self) -> int:
+        with self.lock:
+            return len(self.transactions)
+
+    def clear_mempool(self):
+        """Empties the mempool entirely."""
+        with self.lock:
+            self.transactions.clear()
+            self.fee_heap.clear()
+            self.current_interval_count = 0
+            self.logger.info("[Mempool] Cleared all transactions from the mempool.")
 
     def _dynamic_size_adjustment_routine(self):
         """
-        Periodically adjusts the mempool size based on transaction activity.
-        Increases the mempool size during high activity and decreases it during low activity.
+        Periodically updates self.max_size based on transaction activity in the last intervals.
         """
         while True:
             time.sleep(self.adjustment_interval)
             with self.lock:
                 self.transaction_counts.append(self.current_interval_count)
-                avg_transactions = sum(self.transaction_counts[-5:]) / min(len(self.transaction_counts), 5)  # Moving average over last 5 intervals
-                self.logger.info(f"[Mempool] Average transactions per interval: {avg_transactions}")
+                # Look at last 5 intervals (or fewer if not enough data)
+                recent_counts = self.transaction_counts[-5:]
+                avg_txs = sum(recent_counts) / len(recent_counts) if recent_counts else 0
+                self.logger.info(f"[Mempool] Average transactions per interval: {avg_txs}")
 
-                if avg_transactions > self.high_activity_threshold and self.max_size < 5000:
-                    # Increase mempool size by 1000, up to a maximum of 5000
+                if avg_txs > self.high_activity_threshold and self.max_size < 5000:
+                    old_size = self.max_size
                     self.max_size = min(self.max_size + 1000, 5000)
-                    self.logger.info(f"[Mempool] High activity detected. Increased mempool max_size to {self.max_size}.")
-                elif avg_transactions < self.low_activity_threshold and self.max_size > self.min_size:
-                    # Decrease mempool size by 500, down to min_size
+                    self.logger.info(
+                        f"[Mempool] High activity -> Increased mempool max_size from {old_size} to {self.max_size}."
+                    )
+                elif avg_txs < self.low_activity_threshold and self.max_size > self.min_size:
+                    old_size = self.max_size
                     self.max_size = max(self.max_size - 500, self.min_size)
-                    # Optionally, remove excess transactions if current size exceeds new max_size
+                    # Optionally remove excess if over new max
                     if len(self.transactions) > self.max_size:
                         excess = len(self.transactions) - self.max_size
-                        # Remove lowest fee transactions
                         for _ in range(excess):
                             if self.fee_heap:
-                                _, _, tx_to_remove = heapq.heappop(self.fee_heap)
-                                self.transactions.remove(tx_to_remove)
-                        self.logger.info(f"[Mempool] Low activity detected. Decreased mempool max_size to {self.max_size} and removed {excess} excess transactions.")
+                                _, _, low_fee_tx = heapq.heappop(self.fee_heap)
+                                self.transactions.remove(low_fee_tx)
+                        self.logger.info(
+                            f"[Mempool] Decreased max_size from {old_size} to {self.max_size}. "
+                            f"Removed {excess} low‐fee transactions."
+                        )
                 else:
-                    self.logger.info(f"[Mempool] Mempool size remains at {self.max_size}.")
+                    self.logger.info(
+                        f"[Mempool] Mempool size remains at {self.max_size}."
+                    )
 
-                # Reset current interval count
                 self.current_interval_count = 0
 
     def _purge_stale_transactions_routine(self, stale_time: int):
         """
-        Periodically purges transactions that have been in the mempool longer than stale_time seconds.
+        Purges transactions older than stale_time seconds. Needs 'timestamp_unix' in each TX.
         """
         while True:
             time.sleep(stale_time)
             with self.lock:
-                current_time = time.time()
+                now = time.time()
                 original_count = len(self.transactions)
                 self.transactions = [
                     tx for tx in self.transactions
-                    if (current_time - tx.get('timestamp', current_time)) <= stale_time
+                    if (now - tx.get('timestamp_unix', now)) <= stale_time
                 ]
-                # Rebuild the fee heap
-                self.fee_heap = [(-Decimal(tx['fee']), tx['timestamp'], tx) for tx in self.transactions]
-                heapq.heapify(self.fee_heap)
-                purged_count = original_count - len(self.transactions)
-                if purged_count > 0:
-                    self.logger.info(f"[Mempool] Purged {purged_count} stale transactions from mempool.")
+                # Rebuild fee_heap
+                self.fee_heap = []
+                for tx in self.transactions:
+                    fee_decimal = Decimal(tx.get('fee', '0'))
+                    heapq.heappush(self.fee_heap, (-fee_decimal, tx.get('timestamp', ''), tx))
+                purged = original_count - len(self.transactions)
+                if purged > 0:
+                    self.logger.info(f"[Mempool] Purged {purged} stale TXs older than {stale_time}s.")
 
     def get_high_priority_transactions(self, count: int) -> List[Dict]:
         """
-        Retrieves a specified number of high-priority transactions based on fee.
-
-        :param count: Number of transactions to retrieve.
-        :return: List of high-priority transactions.
+        Returns up to 'count' highest‐fee transactions from the mempool.
         """
         with self.lock:
-            return [item[2] for item in heapq.nsmallest(count, self.fee_heap)]
-
-    def has_transactions(self) -> bool:
-        """
-        Checks if the mempool has any transactions.
-
-        :return: True if mempool is not empty, False otherwise.
-        """
-        with self.lock:
-            return len(self.transactions) > 0
-
-    def get_transaction_count(self) -> int:
-        """
-        Returns the current number of transactions in the mempool.
-
-        :return: Integer count of transactions.
-        """
-        with self.lock:
-            return len(self.transactions)
-
-    def clear_mempool(self):
-        """
-        Clears all transactions from the mempool. Used during chain reorganization.
-        """
-        with self.lock:
-            self.transactions.clear()
-            self.fee_heap.clear()
-            self.current_interval_count = 0
-            self.logger.info("[Mempool] All transactions have been cleared from the mempool.")
+            top_items = heapq.nsmallest(count, self.fee_heap)
+            return [entry[2] for entry in top_items]
 
     def shutdown(self):
         """
-        Gracefully shuts down the mempool by terminating background threads.
-        Note: Since threads are daemonized, they will exit when the main program exits.
-        If additional cleanup is needed, implement here.
+        Gracefully shuts down the mempool. Daemon threads will exit automatically.
         """
         self.logger.info("[Mempool] Shutting down mempool.")
-        # No explicit action needed due to daemon threads
+        # Additional cleanup if needed
