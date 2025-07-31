@@ -43,7 +43,7 @@ class DynamicFeeCalculator:
             'standard_transfer': Decimal('1'),
             'deploy_contract': Decimal('10'),
             'execute_contract': Decimal('8'),
-            'metadata_processing': Decimal('1'),
+            'data_processing': Decimal('1'),
         }
 
         logging.info(f"DynamicFeeCalculator initialized with base_fee={self.base_fee} OMC, "

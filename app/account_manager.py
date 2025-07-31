@@ -80,16 +80,69 @@ class AccountManager:
         """
         with self.balances_lock:
             # Return a shallow copy to avoid external modifications
-            return dict(self.balances)
+            return dict(self.accounts)
         
     def add_account(self, address: str, initial_omc: Decimal) -> bool:
         if address in self.accounts:
             logger.info(f"Account {address} already exists.")
             return False
         # Initialize with OMC, sOMC balances and a nonce of 0.
-        self.accounts[address] = {"OMC": initial_omc, "sOMC": Decimal('0'), "nonce": 0}
+        self.accounts[address] = {
+            "OMC": initial_omc, 
+            "sOMC": Decimal('0'), 
+            "nonce": 0, 
+            'data': {
+                    "withdrawals": 0,
+                    "deposits": 0,
+                    "transfers": 0,
+                    "smart_contracts_deployed": 0,
+                    "smart_contract_calls": 0,
+                    "permissions_granted": 0,
+                    "stake_operations": 0,
+                    "governance_votes": 0
+            }
+        }
         logger.info(f"New account added: {address} with OMC balance {initial_omc}, sOMC 0, and nonce 0.")
         return True
+    
+    def update_data(self, address: str, field_name: str, increment: int = 1, log_entry: dict = None):
+        """
+        Updates a data counter (or other numeric field) in this account's record.
+
+        :param address: The address of the account to update.
+        :param field_name: The name of the data field (e.g. 'stake_operations', 'withdrawals', etc.).
+        :param increment: How much to add to the counter (defaults to 1).
+        """
+        with self.balances_lock:
+            if address not in self.accounts:
+                logger.error(f"Cannot update data for non-existent account {address}.")
+                return
+
+            # Ensure there's a 'data' dict in the account record:
+            if 'data' not in self.accounts[address]:
+                self.accounts[address]['data'] = {}
+
+            # Ensure the target field is numeric:
+            if field_name not in self.accounts[address]['data']:
+                self.accounts[address]['data'][field_name] = 0  # or Decimal('0') if needed
+
+            # Increment the field:
+            current_val = self.accounts[address]['data'][field_name]
+            if not isinstance(current_val, (int, float, Decimal)):
+                logger.error(f"Field '{field_name}' in account data is not numeric. Current value: {current_val}")
+                return
+
+            self.accounts[address]['data'][field_name] = current_val + increment
+            
+            if log_entry:
+                if 'log' not in self.accounts[address]['data']:
+                    self.accounts[address]['data']['log'] = []
+                self.accounts[address]['data']['log'].append(log_entry)
+
+            logger.debug(
+                f"Updated data field '{field_name}' for account {address} by +{increment}. "
+                f"New value: {self.accounts[address]['data'][field_name]}"
+            )
 
     # ----------------------------
     # Event Subscription Methods

@@ -104,7 +104,7 @@ class SmartContracts:
                 raise ValueError("[SmartContracts] Deployment TX missing required fields.")
 
             # 3. Verify signature
-            if not self._verify_signature(tx):
+            if not self._verify_message(tx):
                 raise ValueError("[SmartContracts] Deployment signature invalid.")
 
             # 4. Submit transaction to the Mempool
@@ -210,7 +210,7 @@ class SmartContracts:
                 raise ValueError("[SmartContracts] Execution TX missing required fields.")
 
             # 4. Verify signature
-            if not self._verify_signature(tx):
+            if not self._verify_message(tx):
                 raise ValueError("[SmartContracts] Execution signature invalid.")
 
             # 5. Submit transaction to the Mempool
@@ -417,7 +417,7 @@ class SmartContracts:
             return False
         return True
 
-    def _verify_signature(self, tx: Dict[str, Any]) -> bool:
+    def _verify_message(self, tx: Dict[str, Any]) -> bool:
         """
         Verifies the signature of a transaction using CryptoUtils.
 
@@ -437,7 +437,7 @@ class SmartContracts:
             return False
 
         try:
-            return self.crypto_utils.verify_message(public_key, message, signature)
+            return self.crypto_utils.verify_transaction(public_key, message, signature)
         except Exception as e:
             logger.error(f"[SmartContracts] Signature verification error: {e}")
             return False
