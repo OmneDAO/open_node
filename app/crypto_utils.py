@@ -12,6 +12,10 @@ from cryptography.hazmat.primitives.asymmetric import ec  # for PEM keys
 # Use the ecdsa library for hex-encoded keys
 from ecdsa import SigningKey, VerifyingKey, SECP256k1, BadSignatureError, util
 
+# Import TransactionVerifier for consistent signature verification
+from verification.transaction_verifier import TransactionVerifier
+from settings import CHAIN_ID
+
 class DecimalEncoder(json.JSONEncoder):
     """
     JSON encoder for converting Python Decimal objects to strings
@@ -146,34 +150,40 @@ class CryptoUtils:
 
     def sign_transaction(self, private_key_hex: str, transaction_dict: Dict) -> str:
         """
-        (Option A) Let the ecdsa library do the hashing. 
+        Sign a transaction using the same canonicalization method as TransactionVerifier.
         Steps:
           1) Remove 'signature'/'hash' from the transaction.
-          2) JSON-serialize with (sort_keys=True, separators=(',',':'), optional DecimalEncoder).
+          2) Use the same canonicalization method as TransactionVerifier
           3) Pass the resulting bytes to signing_key.sign(..., hashfunc=hashlib.sha256),
              so ecdsa does a single SHA-256 internally.
           4) Convert DER signature to base64 string.
         """
         try:
+            # Log private key length for debugging
+            self.logger.info(f"Private key length: {len(private_key_hex)}")
+            
             # 1) Remove 'signature'/'hash'
             tx_copy = dict(transaction_dict)
             tx_copy.pop('signature', None)
             tx_copy.pop('hash', None)
+            tx_copy.setdefault("chain_id", CHAIN_ID)
 
-            # 2) Build canonical JSON
+            # 2) Use the same canonicalization method as TransactionVerifier
+            canonical_obj = self._canonicalize_nested(tx_copy)
             canonical_str = json.dumps(
-                tx_copy,
+                canonical_obj,
                 sort_keys=True,
-                separators=(',', ':'),
-                cls=DecimalEncoder
+                separators=(',', ':')
             )
-            logging.info(f"[sign_transaction] canonical_str => {canonical_str}")
+            self.logger.info(f"[sign_transaction] canonical_str => {canonical_str}")
 
             # Raw message (not hashed here, ecdsa will do the hashing)
             payload_bytes = canonical_str.encode('utf-8')
+            self.logger.info(f"Payload bytes length: {len(payload_bytes)}")
 
             # 3) sign using ecdsa
             private_key_bytes = bytes.fromhex(private_key_hex)
+            self.logger.info(f"Private key bytes length: {len(private_key_bytes)}")
             signing_key = SigningKey.from_string(private_key_bytes, curve=SECP256k1)
             # Pass the raw payload + specify hashfunc => ecdsa does exactly one sha256
             signature_der = signing_key.sign(
@@ -181,6 +191,7 @@ class CryptoUtils:
                 hashfunc=hashlib.sha256,
                 sigencode=util.sigencode_der
             )
+            self.logger.info(f"Signature DER length: {len(signature_der)}")
 
             signature_b64 = base64.b64encode(signature_der).decode('utf-8')
             self.logger.info("Transaction signed successfully.")
@@ -188,53 +199,44 @@ class CryptoUtils:
 
         except Exception as e:
             self.logger.error(f"Failed to sign transaction: {e}")
+            self.logger.error(f"Private key hex: {private_key_hex[:10]}...")  # Only log first 10 chars for security
             raise
+
+    def _canonicalize_nested(self, obj):
+        """
+        Canonicalize nested data structures - same method as TransactionVerifier.
+        """
+        if isinstance(obj, dict):
+            return {k: self._canonicalize_nested(v) for k, v in sorted(obj.items())}
+        elif isinstance(obj, list):
+            return [self._canonicalize_nested(item) for item in obj]
+        elif isinstance(obj, Decimal):
+            return str(obj)
+        else:
+            return str(obj)
 
     @staticmethod
     def verify_transaction(pub_key_hex: str, transaction: Dict[str, Any], signature_base64: str) -> bool:
         """
-        (Option B) We do the hashing manually, then call verify_digest().
-        Steps:
-        1) Remove 'signature'/'hash' from transaction.
-        2) Canonical-serialize the remaining fields => JSON (sort_keys=True, no extra spaces).
-        3) Compute SHA-256 digest of that string.
-        4) Decode the signature from base64 => DER, then use verify_digest(...).
-            This ensures we do NOT re-hash the digest internally.
+        Verify a transaction signature using TransactionVerifier for consistency.
         """
         try:
-            # 1) Convert hex-encoded pubkey => VerifyingKey
-            pub_key_bytes = bytes.fromhex(pub_key_hex)
-            vk = VerifyingKey.from_string(pub_key_bytes, curve=SECP256k1)
-
-            # 2) Make a copy to avoid mutating the original
+            # Create a copy of the transaction with the signature
             tx_copy = dict(transaction)
-            tx_copy.pop('signature', None)
-            tx_copy.pop('hash', None)
-
-            # Canonical JSON
-            transaction_str = json.dumps(
-                tx_copy,
-                sort_keys=True,
-                separators=(',', ':'),
-                cls=DecimalEncoder
-            )
-            logging.info(f"[verify_transaction] canonical_str => {transaction_str}")
-
-            # 3) Manual SHA-256 => 32-byte digest
-            digest = hashlib.sha256(transaction_str.encode('utf-8')).digest()
-
-            # 4) decode signature from base64 => DER => verify the *digest*
-            signature_der = base64.b64decode(signature_base64)
-            vk.verify_digest(
-                signature_der,
-                digest,
-                sigdecode=util.sigdecode_der  # no hashfunc => no double-hash
-            )
-            return True
-        except BadSignatureError:
+            tx_copy['signature'] = signature_base64
+            tx_copy['public_key'] = pub_key_hex
+            
+            # Use TransactionVerifier for consistent verification
+            return TransactionVerifier.verify(tx_copy)
+            
+        except Exception as e:
+            logging.error(f"Error during signature verification: {e}")
             return False
-        except Exception:
-            return False
+        
+    def canonical_json(obj: Any) -> str:
+        """Stable JSON serialisation for hashing / signatures."""
+        return json.dumps(obj, sort_keys=True, separators=(",", ":"))
+
 
     def calculate_sha256_hash(self, transaction: dict) -> str:
         """

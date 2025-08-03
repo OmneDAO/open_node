@@ -1559,6 +1559,10 @@ class NetworkManager:
         app.register_blueprint(accounts_bp)
         app.register_blueprint(transfer_bp)
         
+        # Register node API for nexum validation compliance
+        from node_routes import node_api
+        app.register_blueprint(node_api)
+        
         # Initialize and register validator API for network joining
         initialize_validator_api(self.ledger, self.omc, self.staking_manager, self.verifier, self.consensus_engine)
         app.register_blueprint(validator_api)
