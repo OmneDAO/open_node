@@ -18,7 +18,7 @@ LOG = logging.getLogger(__name__)
 # ------------------------------------------------------------------
 # configurable security parameters
 # ------------------------------------------------------------------
-CHAIN_ID              = os.getenv("OMNE_CHAIN_ID", "eaies-net")  # ← Stage 2 ready
+CHAIN_ID              = os.getenv("OMNE_CHAIN_ID", "omne‑devnet")  # ← Stage 2 ready
 TIME_WINDOW_SECONDS   = int(os.getenv("TX_TIME_WINDOW_SEC", "300"))  # ±5 min
 
 class TransactionVerifier:
