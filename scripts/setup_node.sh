@@ -1,6 +1,6 @@
 #!/bin/bash
 # File: scripts/setup_node.sh
-# Purpose: Configure the Omne node with a steward address, environment, and unique settings.
+# Purpose: Configure the Open Source Omne Validator Node with steward address, environment, and unique settings.
 
 # Exit immediately if any command fails
 set -e
@@ -11,64 +11,80 @@ function error_exit {
     exit 1
 }
 
+echo "🌟 Open Source Omne Validator Node Setup"
+echo "=========================================="
+
 # Generate a unique NODE_ID using current timestamp and a random component
-NODE_ID=$(date +%s%N | sha256sum | base64 | head -c 8)
-echo "Generated NODE_ID: ${NODE_ID}"
+NODE_ID=$(date +%s%N | sha256sum | base64 | head -c 12)
+echo "📋 Generated NODE_ID: ${NODE_ID}"
 
 # Calculate the port number based on the current timestamp and a random component
 BASE_PORT=3400
 RANDOM_COMPONENT=$((RANDOM % 1000))
 PORT_NUMBER=$((BASE_PORT + RANDOM_COMPONENT + 1))
-echo "Calculated PORT_NUMBER: ${PORT_NUMBER}"
+echo "🌐 Calculated PORT_NUMBER: ${PORT_NUMBER}"
 
 # Prompt the user for their steward (wallet) address
-read -p "Enter your wallet address, which will be set as the steward address for this node: " STEWARD_ADDRESS
+echo ""
+echo "💼 Steward Address Configuration"
+echo "Your steward address is your wallet address that will control this validator node."
+read -p "Enter your wallet address (steward address): " STEWARD_ADDRESS
 
-# Validate the steward address format (for our blockchain it starts with "0z")
+# Validate the steward address format (for OMNE blockchain it starts with "0z")
 if [[ ! "$STEWARD_ADDRESS" =~ ^0z[0-9a-fA-F]{40}$ ]]; then
     error_exit "Invalid steward address format. It should start with '0z' followed by 40 hexadecimal characters."
 fi
 
 # Prompt the user to select the deployment environment
-echo "Select the deployment environment:"
-echo "1) Development"
-echo "2) Staging"
-echo "3) Production"
+echo ""
+echo "🌍 Environment Selection"
+echo "1) Development  - Local testing network"
+echo "2) Staging      - Pre-production testing"
+echo "3) Production   - Live OMNE network"
 read -p "Enter the number corresponding to your choice: " ENV_CHOICE
 
 case "$ENV_CHOICE" in
     1)
         NODE_ENV="development"
         NETWORK_SUFFIX="development"
-        CXP_SUFFIX="eaies"
+        BOOTSTRAP_NODES="http://dev-bootstrap.omne.io:3400"
+        HASH_API_URL="http://dev-trusted.omne.io/class-hashes.json"
         ;;
     2)
         NODE_ENV="staging"
         NETWORK_SUFFIX="staging"
-        CXP_SUFFIX="atio"
+        BOOTSTRAP_NODES="http://staging-bootstrap.omne.io:3400"
+        HASH_API_URL="http://staging-trusted.omne.io/class-hashes.json"
         ;;
     3)
         NODE_ENV="production"
         NETWORK_SUFFIX="production"
-        CXP_SUFFIX="dicio"
+        BOOTSTRAP_NODES="http://bootstrap.omne.io:3400,http://bootstrap2.omne.io:3400"
+        HASH_API_URL="https://trusted-source.omne.io/class-hashes.json"
         ;;
     *)
         error_exit "Invalid choice. Please run the script again and select a valid environment."
         ;;
 esac
 
-echo "Selected Environment: ${NODE_ENV}"
+echo "✅ Selected Environment: ${NODE_ENV}"
 
-# Set HOST_PORT equal to PORT_NUMBER for simplicity (adjust if needed)
+# Set HOST_PORT equal to PORT_NUMBER for Docker port mapping
 HOST_PORT=${PORT_NUMBER}
 
 # Export environment variables for this script
 export NODE_ENV
 export NETWORK_SUFFIX
 export HOST_PORT
-export NODE_ID  # Export NODE_ID
+export NODE_ID
+export STEWARD_ADDRESS
+export BOOTSTRAP_NODES
+export HASH_API_URL
 
-# Update docker-compose.yml with the new node name and port
+echo ""
+echo "🔧 Updating Docker Configuration"
+
+# Update docker-compose.yml with the new node configuration
 DOCKER_COMPOSE_FILE="docker-compose.yml"
 
 if [ ! -f "$DOCKER_COMPOSE_FILE" ]; then
@@ -76,69 +92,120 @@ if [ ! -f "$DOCKER_COMPOSE_FILE" ]; then
 fi
 
 # Backup the original docker-compose.yml
-cp "$DOCKER_COMPOSE_FILE" "${DOCKER_COMPOSE_FILE}.bak"
+cp "$DOCKER_COMPOSE_FILE" "${DOCKER_COMPOSE_FILE}.backup.$(date +%s)"
+echo "📁 Backed up original docker-compose.yml"
 
-# Update service name and network names based on the environment
-sed -i.bak "s/node\.omne/node.omne/g" "$DOCKER_COMPOSE_FILE" || true
-sed -i.bak "s/container_name: node\.omne/container_name: node.omne/g" "$DOCKER_COMPOSE_FILE" || true
+# Update container name to include NODE_ID for uniqueness
+sed -i.bak "s/container_name: .*/container_name: omne-validator-${NODE_ID}/g" "$DOCKER_COMPOSE_FILE" || true
 
-# Update the port mapping.
-# The regex below matches lines with an optional leading quote around "3400:3400" and replaces them with our calculated HOST_PORT.
-sed -i.bak -E "s/^([[:space:]]*-[[:space:]]*)\"?3400:3400\"?/\1\"${HOST_PORT}:3400\"/" "$DOCKER_COMPOSE_FILE" || true
+# Update the port mapping
+sed -i.bak -E "s/^([[:space:]]*-[[:space:]]*)\"?[0-9]+:3400\"?/\1\"${HOST_PORT}:3400\"/" "$DOCKER_COMPOSE_FILE" || true
 
-# Update environment variables in docker-compose.yml using newline-escaped syntax
-if grep -q 'STEWARD_ADDRESS=' "$DOCKER_COMPOSE_FILE"; then
-    sed -i.bak "s|STEWARD_ADDRESS=.*|STEWARD_ADDRESS=${STEWARD_ADDRESS}|g" "$DOCKER_COMPOSE_FILE"
-else
-    sed -i.bak '/environment:/a\
-    - STEWARD_ADDRESS='"${STEWARD_ADDRESS}" "$DOCKER_COMPOSE_FILE"
-fi
+# Update or add environment variables
+update_env_var() {
+    local var_name=$1
+    local var_value=$2
+    
+    if grep -q "${var_name}=" "$DOCKER_COMPOSE_FILE"; then
+        sed -i.bak "s|${var_name}=.*|${var_name}=${var_value}|g" "$DOCKER_COMPOSE_FILE"
+    else
+        sed -i.bak "/environment:/a\\
+      - ${var_name}=${var_value}" "$DOCKER_COMPOSE_FILE"
+    fi
+}
 
-if grep -q 'NODE_ENV=' "$DOCKER_COMPOSE_FILE"; then
-    sed -i.bak "s|NODE_ENV=.*|NODE_ENV=${NODE_ENV}|g" "$DOCKER_COMPOSE_FILE"
-else
-    sed -i.bak '/environment:/a\
-    - NODE_ENV='"${NODE_ENV}" "$DOCKER_COMPOSE_FILE"
-fi
+update_env_var "STEWARD_ADDRESS" "$STEWARD_ADDRESS"
+update_env_var "NODE_ENV" "$NODE_ENV"
+update_env_var "NODE_ID" "$NODE_ID"
+update_env_var "PORT_NUMBER" "$PORT_NUMBER"
+update_env_var "NETWORK_SUFFIX" "$NETWORK_SUFFIX"
+update_env_var "OMNE_BOOTSTRAP_NODES" "$BOOTSTRAP_NODES"
+update_env_var "HASH_API_URL" "$HASH_API_URL"
 
-if grep -q 'NETWORK_SUFFIX=' "$DOCKER_COMPOSE_FILE"; then
-    sed -i.bak "s|NETWORK_SUFFIX=.*|NETWORK_SUFFIX=${NETWORK_SUFFIX}|g" "$DOCKER_COMPOSE_FILE"
-else
-    sed -i.bak '/environment:/a\
-    - NETWORK_SUFFIX='"${NETWORK_SUFFIX}" "$DOCKER_COMPOSE_FILE"
-fi
+echo "✅ Updated docker-compose.yml with node configuration"
 
-if grep -q 'NODE_ID=' "$DOCKER_COMPOSE_FILE"; then
-    sed -i.bak "s|NODE_ID=.*|NODE_ID=${NODE_ID}|g" "$DOCKER_COMPOSE_FILE"
-else
-    sed -i.bak '/environment:/a\
-    - NODE_ID='"${NODE_ID}" "$DOCKER_COMPOSE_FILE"
-fi
+# Create or update .env file for easier management
+ENV_FILE=".env"
+cat > "$ENV_FILE" << EOF
+# Open Source Omne Validator Node Configuration
+# Generated on $(date)
 
-echo "Updated docker-compose.yml with NODE_ENV, NETWORK_SUFFIX, STEWARD_ADDRESS, PORT_NUMBER, and NODE_ID."
+NODE_ID=${NODE_ID}
+STEWARD_ADDRESS=${STEWARD_ADDRESS}
+NODE_ENV=${NODE_ENV}
+PORT_NUMBER=${PORT_NUMBER}
+HOST_PORT=${HOST_PORT}
+NETWORK_SUFFIX=${NETWORK_SUFFIX}
+OMNE_BOOTSTRAP_NODES=${BOOTSTRAP_NODES}
+HASH_API_URL=${HASH_API_URL}
 
-# Update the Oracle class initialization in app/main.py
-MAIN_PY_FILE="app/main.py"
+# Network configuration
+NETWORK_HOST=0.0.0.0
+NETWORK_PORT=3400
 
-if [ ! -f "$MAIN_PY_FILE" ]; then
-    echo "Warning: app/main.py not found. Skipping update of main.py."
-else
-    # Backup main.py
-    cp "$MAIN_PY_FILE" "${MAIN_PY_FILE}.bak"
+# Storage configuration
+STORAGE_BACKEND=file
+DATA_DIRECTORY=./data
 
-    # Update steward address
-    sed -i.bak "s/self\.node\.steward = \".*\"/self.node.steward = \"${STEWARD_ADDRESS}\"/g" "$MAIN_PY_FILE" || true
+# Consensus configuration
+RANDAO_COMMIT_DURATION=30
+RANDAO_REVEAL_DURATION=30
+POEF_TASK_DIFFICULTY=4
 
-    # Update node URL based on environment
-    sed -i.bak "s|current_node_url = .*|current_node_url = \"http://${NODE_ID}.omne:${PORT_NUMBER}\"|g" "$MAIN_PY_FILE" || true
+# Fee configuration
+BASE_FEE=0.000001
+FEE_MULTIPLIER=1.5
+EOF
 
-    echo "Updated app/main.py with steward address and node URL."
-fi
+echo "📄 Created .env file with node configuration"
 
-echo "Setup complete. You can now run 'docker-compose up -d' to start your node."
+echo ""
+echo "📊 Configuration Summary"
+echo "========================"
+echo "Node ID: ${NODE_ID}"
+echo "Steward Address: ${STEWARD_ADDRESS}"
+echo "Environment: ${NODE_ENV}"
+echo "Container Name: omne-validator-${NODE_ID}"
+echo "Port Mapping: ${HOST_PORT}:3400"
+echo "Bootstrap Nodes: ${BOOTSTRAP_NODES}"
+echo "Hash Verification: ${HASH_API_URL}"
 
-read -p "Do you want to start the node now? (y/n): " START_NOW
+echo ""
+echo "✅ Setup complete!"
+echo ""
+echo "🚀 Next Steps:"
+echo "1. Review the generated .env file for any additional configuration"
+echo "2. Run 'docker-compose up -d' to start your validator node"
+echo "3. Monitor logs with 'docker-compose logs -f'"
+echo "4. Check node status at http://localhost:${HOST_PORT}/api/health"
+
+read -p "Do you want to start the validator node now? (y/n): " START_NOW
 if [[ "$START_NOW" == "y" || "$START_NOW" == "Y" ]]; then
+    echo ""
+    echo "🚀 Starting Open Source Omne Validator Node..."
     docker-compose up -d
-    echo "Docker Compose is starting your node..."
+    
+    echo ""
+    echo "⏳ Waiting for node to initialize..."
+    sleep 5
+    
+    echo ""
+    echo "📊 Node Status:"
+    if curl -s "http://localhost:${HOST_PORT}/api/health" > /dev/null 2>&1; then
+        echo "✅ Node is responding to health checks"
+        echo "🌐 Health endpoint: http://localhost:${HOST_PORT}/api/health"
+        echo "📈 Monitor with: docker-compose logs -f"
+    else
+        echo "⚠️  Node is still starting up..."
+        echo "📈 Check startup progress with: docker-compose logs -f"
+    fi
+else
+    echo ""
+    echo "💡 To start your node later, run: docker-compose up -d"
+    echo "📈 To monitor logs: docker-compose logs -f"
 fi
+
+echo ""
+echo "🎉 Open Source Omne Validator Node setup completed!"
+echo "💼 Your node will join the ${NODE_ENV} network as a validator"
+echo "🔒 Node secured with steward address: ${STEWARD_ADDRESS}"

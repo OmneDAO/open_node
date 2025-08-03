@@ -124,7 +124,41 @@ class ValidatorInitializer:
         # 3) Validator Initialization (connects to existing network)
         self._initialize_validator_safely()
 
+        # 4) Register classes for integrity verification
+        self._register_classes_for_verification()
+
         logging.info("Validator initialization completed successfully")
+
+    def _register_classes_for_verification(self):
+        """Register core classes for network integrity verification"""
+        try:
+            # Define the same classes as in the genesis node
+            classes_to_hash = {
+                'object_registry': self.object_registry.__class__,
+                'coin': OMC,
+                'quantum_utils': QuantumUtils,
+                'verifier': Verifier,
+                'permissions_manager': PermissionManager,
+                'fee_calculator': DynamicFeeCalculator,
+                'ledger': self.ledger.__class__,
+                'mempool': Mempool,
+                'smart_contracts': SmartContracts,
+                'class_integrity_verifier': ClassIntegrityVerifier,
+                'crypto_utils': CryptoUtils,
+                'consensus_engine': ConsensusEngine,
+                'account_manager': AccountManager,
+                'transaction_verifier': TransactionVerifier,
+                'network_manager': NetworkManager
+            }
+            
+            # Set classes for verification
+            ClassIntegrityVerifier.set_classes_to_verify(classes_to_hash)
+            
+            logging.info("Classes registered for integrity verification")
+            
+        except Exception as e:
+            logging.error(f"Failed to register classes for verification: {e}")
+            # Don't raise - this shouldn't block validator startup
 
     @with_retry(max_attempts=3, delay=1.0)
     def _initialize_validator_safely(self):

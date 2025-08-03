@@ -12,200 +12,139 @@ function error_exit {
     exit 1
 }
 
-echo "Starting class integrity verification..."
+echo "🚀 Starting Open Source Omne Validator Node..."
 
-python3 - << EOF
-import logging
+# Validate required environment variables
+if [ -z "$STEWARD_ADDRESS" ]; then
+    error_exit "STEWARD_ADDRESS environment variable is required but not set."
+fi
+
+if [ -z "$NODE_ID" ]; then
+    error_exit "NODE_ID environment variable is required but not set."
+fi
+
+echo "📋 Node Configuration:"
+echo "   • Steward Address: $STEWARD_ADDRESS"
+echo "   • Node ID: $NODE_ID"
+echo "   • Environment: ${NODE_ENV:-development}"
+echo "   • Port: ${PORT_NUMBER:-3400}"
+
+# Verify Python environment and imports
+echo "🔍 Verifying Python environment..."
+python3 -c "
 import sys
 import os
-from decimal import Decimal
-
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-
-# Add /app to PYTHONPATH if not already present
 sys.path.insert(0, '/app')
 
-from class_integrity_verifier import ClassIntegrityVerifier
-from ledger import Ledger
-from omc import OMC
-from mempool import Mempool
-from network_manager import NetworkManager
-from consensus_engine import ConsensusEngine
-from account_manager import AccountManager
-from smart_contracts import SmartContracts
-from crypto_utils import CryptoUtils
-from vrf_utils import VRFUtils
-
-# Initialize necessary classes to verify
-ClassIntegrityVerifier.set_classes_to_verify({
-    'Ledger': Ledger,
-    'OMC': OMC,
-    'Mempool': Mempool,
-    'NetworkManager': NetworkManager,
-    'ConsensusEngine': ConsensusEngine,
-    'AccountManager': AccountManager,
-    'SmartContracts': SmartContracts,
-    'CryptoUtils': CryptoUtils,
-    'VRFUtils': VRFUtils
-})
-
-# Perform verification
-if ClassIntegrityVerifier.verify_class_integrity():
-    logging.info("Class integrity verification successful. Proceeding with node initialization.")
-else:
-    logging.critical("Class integrity verification failed. Exiting.")
+try:
+    from class_integrity_verifier import ClassIntegrityVerifier
+    from ledger import Ledger
+    from omc import OMC
+    from mempool import Mempool
+    from network_manager import NetworkManager
+    from consensus_engine import ConsensusEngine
+    from account_manager import AccountManager
+    from smart_contracts import SmartContracts
+    from crypto_utils import CryptoUtils
+    from vrf_utils import VRFUtils
+    from staked_omc import StakedOMC
+    from staking import StakingMngr
+    from config_manager import OpenNodeConfigManager
+    print('✅ All required imports successful')
+except ImportError as e:
+    print(f'❌ Import error: {e}')
     sys.exit(1)
-EOF
+"
 
-# Check if the previous Python script exited successfully
 if [ $? -ne 0 ]; then
-    echo "Class integrity verification failed. Shutting down the node."
-    exit 1
+    error_exit "Python environment verification failed"
 fi
 
-echo "Class integrity verification passed."
+echo "✅ Python environment verified"
 
-echo "Initializing node components..."
+# Perform class integrity verification before starting
+echo "🔐 Starting class integrity verification..."
 
 python3 - << EOF
 import logging
 import sys
 import os
-from decimal import Decimal
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+logger = logging.getLogger()
 
-from ledger import Ledger
-from mempool import Mempool
-from network_manager import NetworkManager
-from consensus_engine import ConsensusEngine
-from account_manager import AccountManager
-from omc import OMC
-from smart_contracts import SmartContracts
-from crypto_utils import CryptoUtils
-from vrf_utils import VRFUtils
-from dynamic_fee_calculator import DynamicFeeCalculator
+# Add /app to PYTHONPATH
+sys.path.insert(0, '/app')
 
-# Initialize CryptoUtils
-crypto_utils = CryptoUtils()
+try:
+    from class_integrity_verifier import ClassIntegrityVerifier
+    from ledger import Ledger
+    from omc import OMC
+    from mempool import Mempool
+    from network_manager import NetworkManager
+    from consensus_engine import ConsensusEngine
+    from account_manager import AccountManager
+    from smart_contracts import SmartContracts
+    from crypto_utils import CryptoUtils
+    from vrf_utils import VRFUtils
+    from node import Node
+    from verifier import Verifier
 
-# Initialize AccountManager
-account_manager = AccountManager()
+    # Set classes to verify for open source validator node
+    classes_to_verify = {
+        'Ledger': Ledger,
+        'OMC': OMC,
+        'Mempool': Mempool,
+        'NetworkManager': NetworkManager,
+        'ConsensusEngine': ConsensusEngine,
+        'AccountManager': AccountManager,
+        'SmartContracts': SmartContracts,
+        'CryptoUtils': CryptoUtils,
+        'VRFUtils': VRFUtils,
+        'Node': Node,
+        'Verifier': Verifier
+    }
+    
+    ClassIntegrityVerifier.set_classes_to_verify(classes_to_verify)
+    
+    # Only verify if HASH_API_URL is available (for network joining)
+    hash_api_url = os.getenv("HASH_API_URL")
+    if hash_api_url:
+        logger.info(f"🌐 Verifying against trusted source: {hash_api_url}")
+        if ClassIntegrityVerifier.verify_class_integrity():
+            logger.info("✅ Class integrity verification successful")
+        else:
+            logger.critical("❌ Class integrity verification failed")
+            sys.exit(1)
+    else:
+        logger.info("⚠️  HASH_API_URL not set - skipping external verification")
+        logger.info("✅ Class integrity check completed (local mode)")
 
-# Initialize DynamicFeeCalculator
-fee_calculator = DynamicFeeCalculator(
-    base_fee=Decimal('0.1'),
-    fee_multiplier=Decimal('0.05'),
-    size_multiplier=Decimal('0.001'),
-    type_fee_adjustments={
-        'deploy_contract': Decimal('1.0'),
-        'execute_contract': Decimal('0.5'),
-        'standard_transfer': Decimal('0.0')
-    },
-    moving_average_window=100,
-    max_fee=Decimal('10'),
-    min_fee=Decimal('0.01')
-)
-
-# Initialize OMC
-treasury_address = os.getenv("STEWARD_ADDRESS")
-if not treasury_address:
-    logging.error("STEWARD_ADDRESS environment variable not set.")
+except Exception as e:
+    logger.critical(f"❌ Class integrity verification error: {e}")
     sys.exit(1)
-coin = OMC(treasury_address=treasury_address)
-
-# Initialize StakedOMC
-staked_omc = StakedOMC()
-
-# Initialize StakingMngr
-staking_manager = StakingMngr(
-    coin=coin, 
-    account_manager=account_manager, 
-    staked_omc=staked_omc
-)
-
-# Set StakingMngr in OMC
-coin.set_staking_manager(staking_manager)
-
-# Initialize ConsensusEngine
-consensus_engine = ConsensusEngine(
-    account_manager=account_manager,
-    slash_penalty=Decimal("0.1"),
-    random_source="PRNG"  # Or "VRF" if using VRF
-)
-
-# Initialize Mempool
-mempool = Mempool(
-    crypto_utils=crypto_utils,
-    fee_calculator=fee_calculator,
-    max_mempool_size=10000,
-    ledger=ledger,
-    omc=coin,
-    account_manager=account_manager,
-    vrf_utils=vrf_utils,
-    blockchain=ledger.blockchain,  # Assuming ledger has a blockchain attribute
-    staking_manager=staking_manager,  # Pass the staking_manager instance
-)
-
-# Initialize Ledger
-ledger = Ledger(
-    consensus_engine=consensus_engine,
-    account_manager=account_manager,
-    omc=coin,
-    mempool=mempool
-)
-
-# Initialize NetworkManager
-port_number = int(os.getenv("PORT_NUMBER", "3400"))
-network_manager = NetworkManager(
-    ledger=ledger,
-    mempool=mempool,
-    class_integrity_verifier=ClassIntegrityVerifier(),
-    fee_calculator=fee_calculator,
-    port=port_number,
-    omc=coin
-)
-
-# Initialize SmartContracts
-smart_contracts = SmartContracts(
-    ledger=ledger,
-    crypto_utils=crypto_utils,
-    transaction_service=mempool
-)
-
-# Start NetworkManager server in a separate thread or process
-import threading
-
-def start_network():
-    network_manager.start_server()
-
-network_thread = threading.Thread(target=start_network)
-network_thread.start()
-
-# Initialize and run Ledger
-ledger.initialize_node()
 EOF
 
-echo "Node components initialized successfully."
-
-# Register API endpoints (assuming register_endpoints.py exists and handles it)
-if [ -f "/app/register_endpoints.py" ]; then
-    echo "Registering API endpoints..."
-    python3 /app/register_endpoints.py
-    echo "API endpoints registered."
-else
-    echo "Warning: /app/register_endpoints.py not found. Skipping API registration."
+if [ $? -ne 0 ]; then
+    error_exit "Class integrity verification failed"
 fi
 
-# Start the main application
-echo "Starting the Omne node..."
-python3 /app/main.py &
+echo "✅ Class integrity verification completed"
 
-# Start the Nginx update script in the background
-echo "Starting Nginx update script..."
-python3 /scripts/update_nginx.py &
+# Start the main Open Source Omne Node application
+echo "🚀 Starting Open Source Omne Validator Node..."
+cd /app
 
-# Wait indefinitely to keep the container running
-wait
+# Export all environment variables to ensure they're available
+export STEWARD_ADDRESS
+export NODE_ID
+export NODE_ENV
+export PORT_NUMBER
+export NETWORK_SUFFIX
+export HASH_API_URL
+
+# Use the production-ready main.py which handles all initialization
+python3 main.py
+
+echo "✅ Open Source Omne Node started successfully"

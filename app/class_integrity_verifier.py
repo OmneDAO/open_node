@@ -99,3 +99,70 @@ class ClassIntegrityVerifier:
                 logging.info(f"Integrity verification passed for class {class_name}.")
 
         return all_verified
+
+    @classmethod
+    def verify_against_genesis_block(cls, reference_hashes: Dict[str, str]) -> bool:
+        """
+        Verify local class implementations against genesis block reference hashes.
+        Used by joining nodes to validate their implementation matches the network.
+        
+        Args:
+            reference_hashes: Dictionary mapping class names to reference hash values from genesis block
+            
+        Returns:
+            True if all classes match reference implementation, False otherwise
+        """
+        if not cls.classes_to_verify:
+            logging.warning("No classes set for integrity verification.")
+            return True  # Nothing to verify
+            
+        all_verified = True
+        for class_name, class_type in cls.classes_to_verify.items():
+            # Compute local hash
+            local_hash = cls.compute_class_hash(class_type)
+            if not local_hash:
+                logging.error(f"Failed to compute hash for class {class_name}")
+                all_verified = False
+                continue
+                
+            # Get reference hash from genesis block
+            reference_hash = reference_hashes.get(class_name)
+            if not reference_hash:
+                logging.warning(f"No reference hash found for class {class_name} - skipping")
+                continue
+                
+            # Compare hashes
+            if local_hash != reference_hash:
+                logging.critical(f"🚨 INTEGRITY VIOLATION: Class {class_name} does not match reference implementation!")
+                logging.critical(f"   Expected: {reference_hash}")
+                logging.critical(f"   Computed: {local_hash}")
+                all_verified = False
+            else:
+                logging.debug(f"✅ Class {class_name} verified successfully")
+                
+        if all_verified:
+            logging.info("🎉 All classes verified successfully against genesis block")
+        else:
+            logging.error("💥 One or more classes failed verification - node implementation is compromised")
+            
+        return all_verified
+    
+    @classmethod
+    def get_local_class_hashes(cls, classes: Dict[str, Type]) -> Dict[str, str]:
+        """
+        Compute hashes for a set of local classes.
+        Used to generate class hash data for API responses.
+        
+        Args:
+            classes: Dictionary mapping class names to class types
+            
+        Returns:
+            Dictionary mapping class names to their computed hashes
+        """
+        class_hashes = {}
+        for class_name, class_type in classes.items():
+            hash_value = cls.compute_class_hash(class_type)
+            if hash_value:
+                class_hashes[class_name] = hash_value
+                
+        return class_hashes
