@@ -18,6 +18,7 @@ from smart_contracts import SmartContracts
 from verifier import Verifier
 from vrf_utils import VRFUtils
 from validator_api import validator_api, initialize_validator_api
+from verification.transaction_verifier import TransactionVerifier
 from pymongo import MongoClient
 from pymongo.server_api import ServerApi
 import logging
@@ -98,6 +99,14 @@ class NetworkManager:
         self.account_manager = account_manager
         self.staking_manager = staking_manager
         self.verifier = verifier
+        
+        # Fix the ledger's OMC reference if it's None but we have an OMC instance
+        logging.info(f"NetworkManager OMC debugging: ledger.omc={self.ledger.omc}, self.omc={self.omc}")
+        if self.ledger.omc is None and self.omc is not None:
+            self.ledger.omc = self.omc
+            logging.info("Fixed ledger.omc reference using NetworkManager's OMC instance")
+        else:
+            logging.info("No OMC reference fix needed")
 
         self.port = port
         self.peers = set()  # Track known peer URLs
@@ -653,8 +662,8 @@ class NetworkManager:
             if not transaction:
                 return jsonify({"error": "No transaction data received."}), 400
 
-            # Validate the transaction
-            if not self.ledger.account_manager.validate_transaction(transaction):
+            # Validate the transaction using TransactionVerifier instead of account_manager
+            if not TransactionVerifier.verify(transaction):
                 return jsonify({"error": "Invalid transaction."}), 400
 
             # Add to mempool
@@ -1183,12 +1192,12 @@ class NetworkManager:
             try:
                 logger.debug("Fetching coin economy data.")
 
-                # Example economy data structure
+                # Economy data structure for open nodes (no treasury access)
                 economy_data = {
                     "total_coin_supply": str(self.ledger.omc.coin_max),
                     "total_staked": str(self.ledger.staking_manager.get_total_staked()),
-                    "staked_omc_distributed": str(self.ledger.staking_manager.get_staked_omc_distributed()),
-                    "treasury_balance": str(self.ledger.omc.get_balance(self.ledger.omc.treasury_address))
+                    "staked_omc_distributed": str(self.ledger.staking_manager.get_staked_omc_distributed())
+                    # Note: Treasury balance not accessible to open nodes
                 }
 
                 logger.debug(f"Coin economy data: {economy_data}")

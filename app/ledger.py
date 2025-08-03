@@ -172,16 +172,22 @@ class Ledger:
         """
         return self._validate_block_structure(block) and self._validate_block_contents(block)
 
-    def finalize_block(self, block: Block) -> None:
+    def finalize_block(self, block: Block) -> bool:
         """
         Applies block transactions atomically (debit/credit accounts) and mints rewards.
         Called AFTER the block has been appended to the chain, typically.
+        Returns True if finalization was successful, False otherwise.
         """
-        with self.lock:
-            self.logger.info(
-                f"[Ledger] Finalizing block {block.index} with {len(block.transactions)} transactions."
-            )
-            self._finalize_block_transactions(block)
+        try:
+            with self.lock:
+                self.logger.info(
+                    f"[Ledger] Finalizing block {block.index} with {len(block.transactions)} transactions."
+                )
+                self._finalize_block_transactions(block)
+            return True
+        except Exception as e:
+            self.logger.error(f"Block finalization failed: {e}")
+            return False
 
     # ----------------------------------------------------------------
     #  Fork Handling and Chain Adoption

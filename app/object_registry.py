@@ -111,6 +111,10 @@ class ObjectRegistry:
         """Return the **hex string** of the current trie root."""
         return self.storage.root_hash()
 
+    def merkle_root(self) -> str:
+        """Return the Merkle root hash of the registry for consensus."""
+        return self.storage.root_hash()
+
     def verify_proof(self, obj_id: str, slot: str, proof: list, expected_value: Any) -> bool:
         """
         Verify a Merkle-Patricia inclusion proof for <obj_id>/<slot>.
