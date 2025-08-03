@@ -16,7 +16,7 @@ OMNE Open Source Node allows individuals to run their own production-grade valid
 
 ```bash
 # 1. Clone the repository
-git clone <repository-url>
+git clone [<repository-url>](https://github.com/OmneDAO/open_node)
 cd open_node
 
 # 2. Install dependencies
