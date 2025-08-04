@@ -1,6 +1,6 @@
 bip32utils
 boto3
-cryptography
+cryptography>=3.4.7,<4.0
 ecdsa
 flask
 flask-cors
@@ -32,9 +32,6 @@ psutil>=5.9.0
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
 pytest-cov>=4.0.0
-
-# Security and encryption
-cryptography>=41.0.0
 
 # Logging and monitoring
 structlog>=23.0.0
